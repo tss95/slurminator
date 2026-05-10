@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slurminator"
+version = "0.1.0"
+description = "Reusable SLURM/HPC experiment orchestration package."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2",
+  "PyYAML>=6",
+  "rich>=13",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 120
+skip-string-normalization = true
+skip-magic-trailing-comma = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
