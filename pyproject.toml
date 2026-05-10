@@ -26,3 +26,7 @@ skip-magic-trailing-comma = true
 line-length = 120
 target-version = "py311"
 
+[tool.pytest.ini_options]
+markers = [
+  "unit: fast unit tests",
+]
