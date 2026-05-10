@@ -8,6 +8,7 @@ from pathlib import Path
 from shlex import quote, split
 from typing import Any, Protocol, runtime_checkable
 
+from slurminator.experiments.status_enum import ExperimentStatus
 from slurminator.schemas.status_schema import OrchestratorStatus
 from slurminator.status_projection import project_status_to_experiment, status_projection_fields
 
@@ -61,6 +62,9 @@ class OrchestratorPlugin(Protocol):
     ) -> Any | None:
         """Return a project-specific terminal status override from job logs."""
 
+    def annotate_log_tail(self, *, exp: dict[str, Any], log_tail: str) -> None:
+        """Optionally annotate an experiment row from job logs."""
+
     def status_projection_options(self) -> Mapping[str, Any]:
         """Return options for projecting target status files into experiment rows."""
 
@@ -110,8 +114,16 @@ class DefaultOrchestratorPlugin:
     def interpret_log_tail(
         self, *, exp: Mapping[str, Any], log_tail: str, current_status: Any, stage: str = "pre_heuristics"
     ) -> Any | None:
-        """Return no log-derived status override by default."""
+        """Interpret common opt-in status markers and broadly useful failure keywords."""
+        log_lower = log_tail.lower()
+        if stage == "pre_heuristics":
+            return _interpret_explicit_status_marker(log_lower)
+        if stage == "heuristics":
+            return _interpret_common_failure_keywords(log_lower)
         return None
+
+    def annotate_log_tail(self, *, exp: dict[str, Any], log_tail: str) -> None:
+        """Default plugin does not annotate experiment rows from logs."""
 
     def status_projection_options(self) -> Mapping[str, Any]:
         """Return package-default status projection options."""
@@ -234,6 +246,37 @@ def _normalise_command_args(value: object, *, field_name: str) -> list[str]:
     if isinstance(value, Sequence):
         return [quote(str(item)) for item in value]
     raise TypeError(f"{field_name} must be a string or sequence of strings, got {type(value).__name__}.")
+
+
+def _interpret_explicit_status_marker(log_lower: str) -> ExperimentStatus | None:
+    """Interpret Slurminator's optional plain-text terminal status convention."""
+    for line in reversed(log_lower.splitlines()):
+        if "experiment_status" not in line:
+            continue
+        if "failed" in line or "failure" in line:
+            return ExperimentStatus.FAILED
+        if "success" in line or "completed" in line:
+            return ExperimentStatus.COMPLETED
+        break
+    return None
+
+
+def _interpret_common_failure_keywords(log_lower: str) -> ExperimentStatus | None:
+    """Interpret framework-neutral-ish timeout/OOM markers as a convenience default."""
+    timeout_keywords = ("job timed out", "due to time limit")
+    if any(keyword in log_lower for keyword in timeout_keywords):
+        return ExperimentStatus.TIMEOUT
+
+    oom_keywords = (
+        "out of memory",
+        "outofmemoryerror",
+        "cuda out of memory",
+        "hip out of memory",
+        "cudaerror: out of memory",
+    )
+    if any(keyword in log_lower for keyword in oom_keywords):
+        return ExperimentStatus.OOM
+    return None
 
 
 def _missing_command_error(exp: Mapping[str, Any]) -> NotImplementedError:

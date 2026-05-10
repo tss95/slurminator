@@ -4,6 +4,7 @@ import pytest
 
 from slurminator.callbacks.status_normalization import GenericProgressSnapshot, MetricDisplayCandidate
 from slurminator.callbacks.status_normalization import normalize_status_payload
+from slurminator.experiments.status_enum import ExperimentStatus
 from slurminator.plugins import CommandBuildContext, DefaultOrchestratorPlugin, OrchestratorPlugin, SimpleCommandPlugin
 
 pytestmark = pytest.mark.unit
@@ -20,6 +21,7 @@ def test_default_plugin_is_protocol_compatible() -> None:
     assert plugin.extra_remote_dirs(base_path=SimpleNamespace(), experiment_file=SimpleNamespace()) == ()
     assert plugin.interpret_log_tail(exp={}, log_tail="", current_status="running", stage="pre_heuristics") is None
     assert plugin.interpret_log_tail(exp={}, log_tail="", current_status="running", stage="post_heuristics") is None
+    plugin.annotate_log_tail(exp={}, log_tail="")
 
     with pytest.raises(NotImplementedError) as excinfo:
         plugin.build_commands_line({}, CommandBuildContext(gpus=1, hpc_type="cluster"))
@@ -110,3 +112,35 @@ def test_default_plugin_projects_target_status_and_display_metrics() -> None:
     assert exp["status_links"] == {"tracker": "abc"}
     assert exp["acc"] == 0.9
     assert plugin.extract_display_metrics(exp) == {"acc": 0.9}
+
+
+def test_default_plugin_interprets_optional_status_marker_and_common_failure_keywords() -> None:
+    plugin = DefaultOrchestratorPlugin()
+
+    assert (
+        plugin.interpret_log_tail(
+            exp={},
+            log_tail="training\nEXPERIMENT_STATUS=FAILED\n",
+            current_status=ExperimentStatus.COMPLETED,
+            stage="pre_heuristics",
+        )
+        == ExperimentStatus.FAILED
+    )
+    assert (
+        plugin.interpret_log_tail(
+            exp={},
+            log_tail="slurmstepd: error: *** JOB 123 CANCELLED DUE TO TIME LIMIT ***",
+            current_status=ExperimentStatus.COMPLETED,
+            stage="heuristics",
+        )
+        == ExperimentStatus.TIMEOUT
+    )
+    assert (
+        plugin.interpret_log_tail(
+            exp={},
+            log_tail="RuntimeError: CUDA out of memory.",
+            current_status=ExperimentStatus.COMPLETED,
+            stage="heuristics",
+        )
+        == ExperimentStatus.OOM
+    )
