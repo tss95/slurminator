@@ -10,6 +10,7 @@ from slurminator.config.cluster_registry import (
     parse_cluster_configs,
     set_cluster_configs,
 )
+from slurminator.config.cluster_detection import determine_current_hpc, is_current_hpc
 from slurminator.config.orchestrator_config import (
     DashboardSettings,
     OrchestratorSettings,
@@ -42,7 +43,9 @@ __all__ = [
     "RetrySettings",
     "TimeoutRiskSettings",
     "UserConfigPaths",
+    "determine_current_hpc",
     "find_user_config",
+    "is_current_hpc",
     "load_hpc_config_file",
     "load_orchestrator_config_file",
     "load_user_config",
