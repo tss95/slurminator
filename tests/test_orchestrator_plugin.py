@@ -1,11 +1,11 @@
-from types import SimpleNamespace
-
 import pytest
 
 from slurminator.callbacks.status_normalization import GenericProgressSnapshot, MetricDisplayCandidate
 from slurminator.callbacks.status_normalization import normalize_status_payload
+from slurminator.display_helpers import extract_display_metrics
 from slurminator.experiments.status_enum import ExperimentStatus
 from slurminator.plugins import CommandBuildContext, DefaultOrchestratorPlugin, OrchestratorPlugin, SimpleCommandPlugin
+from slurminator.status_projection import project_status_to_experiment
 
 pytestmark = pytest.mark.unit
 
@@ -15,10 +15,6 @@ def test_default_plugin_is_protocol_compatible() -> None:
 
     assert isinstance(plugin, OrchestratorPlugin)
     assert plugin.validate_experiment({}, {}) is False
-    assert plugin.pinned_hpc_for_experiment({}) is None
-    assert plugin.resource_overrides_for_experiment({}) == {}
-    assert plugin.sbatch_export_vars(hpc_type="cluster", cluster_config=SimpleNamespace()) == {}
-    assert plugin.extra_remote_dirs(base_path=SimpleNamespace(), experiment_file=SimpleNamespace()) == ()
     assert plugin.interpret_log_tail(exp={}, log_tail="", current_status="running", stage="pre_heuristics") is None
     assert plugin.interpret_log_tail(exp={}, log_tail="", current_status="running", stage="post_heuristics") is None
     plugin.annotate_log_tail(exp={}, log_tail="")
@@ -102,16 +98,15 @@ def test_default_plugin_projects_target_status_and_display_metrics() -> None:
         metric_info={"val/acc": MetricDisplayCandidate(shortform="acc", higher_better=True)},
         links={"tracker": "abc"},
     )
-    plugin = DefaultOrchestratorPlugin()
     exp: dict = {}
 
-    updated = plugin.project_status_to_experiment(exp, status)
+    updated = project_status_to_experiment(exp, status)
 
     assert "status_schema_version" in updated
     assert exp["status_run_name"] == "run-1"
     assert exp["status_links"] == {"tracker": "abc"}
     assert exp["acc"] == 0.9
-    assert plugin.extract_display_metrics(exp) == {"acc": 0.9}
+    assert extract_display_metrics(exp) == {"acc": 0.9}
 
 
 def test_default_plugin_interprets_optional_status_marker_and_common_failure_keywords() -> None:

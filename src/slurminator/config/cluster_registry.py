@@ -107,6 +107,9 @@ class HPCClusterConfig:
     mem_per_gpu_gb: int | None = None
     gpu_bind_pattern: str | None = None
     exclude_nodes: list[str] | None = None
+    pinned_datasets: list[str] | None = None
+    dataset_resource_overrides: dict[str, dict[str, Any]] | None = None
+    sbatch_env: dict[str, str] | None = None
 
     request_gpu_pair: bool = False
 
@@ -133,6 +136,13 @@ class HPCClusterConfig:
         if isinstance(self.exclude_nodes, str):
             raw = self.exclude_nodes.replace(" ", ",")
             self.exclude_nodes = [node for node in (part.strip() for part in raw.split(",")) if node]
+        if isinstance(self.pinned_datasets, str):
+            raw = self.pinned_datasets.replace(" ", ",")
+            self.pinned_datasets = [dataset for dataset in (part.strip() for part in raw.split(",")) if dataset]
+        if self.dataset_resource_overrides is None:
+            self.dataset_resource_overrides = {}
+        if self.sbatch_env is None:
+            self.sbatch_env = {}
         if self.save_path:
             if not self.sync_pipe_dir:
                 self.sync_pipe_dir = str(Path(self.save_path) / "wandb_sync_pipe")
