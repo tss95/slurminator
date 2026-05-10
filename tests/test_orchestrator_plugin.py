@@ -4,7 +4,7 @@ import pytest
 
 from slurminator.callbacks.status_normalization import GenericProgressSnapshot, MetricDisplayCandidate
 from slurminator.callbacks.status_normalization import normalize_status_payload
-from slurminator.plugins import CommandBuildContext, DefaultOrchestratorPlugin, OrchestratorPlugin
+from slurminator.plugins import CommandBuildContext, DefaultOrchestratorPlugin, OrchestratorPlugin, SimpleCommandPlugin
 
 pytestmark = pytest.mark.unit
 
@@ -21,8 +21,70 @@ def test_default_plugin_is_protocol_compatible() -> None:
     assert plugin.interpret_log_tail(exp={}, log_tail="", current_status="running", stage="pre_heuristics") is None
     assert plugin.interpret_log_tail(exp={}, log_tail="", current_status="running", stage="post_heuristics") is None
 
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(NotImplementedError) as excinfo:
         plugin.build_commands_line({}, CommandBuildContext(gpus=1, hpc_type="cluster"))
+    message = str(excinfo.value)
+    assert "extra_command" in message
+    assert "command" in message
+    assert "SimpleCommandPlugin" in message
+    assert "build_commands_line" in message
+
+
+def test_default_plugin_uses_explicit_experiment_command() -> None:
+    plugin = DefaultOrchestratorPlugin()
+    context = CommandBuildContext(gpus=1, hpc_type="cluster")
+
+    assert plugin.build_commands_line({"extra_command": "python train.py --epochs 1"}, context) == (
+        "python train.py --epochs 1"
+    )
+    assert plugin.build_commands_line({"command": "bash scripts/train.sh"}, context) == "bash scripts/train.sh"
+
+
+def test_simple_command_plugin_builds_entrypoint_config_command() -> None:
+    plugin = SimpleCommandPlugin(
+        entrypoint="python train.py",
+        config_arg="--config",
+        extra_args=("--no-progress",),
+        sweep_params_arg="--overrides",
+        multi_experiment_flag="--auto-retry",
+    )
+
+    command = plugin.build_commands_line(
+        {
+            "experiment_id": "exp-1",
+            "config": "configs/train har.yaml",
+            "command_args": ["--seed", "42"],
+            "sweep_params": "model.lr=0.001;trainer.max_epochs=2",
+        },
+        CommandBuildContext(gpus=1, hpc_type="cluster", multi_experiment=True),
+    )
+
+    assert command == (
+        "python train.py --config 'configs/train har.yaml' --no-progress --seed 42 "
+        "--overrides 'model.lr=0.001;trainer.max_epochs=2' --auto-retry --orchestrator"
+    )
+
+
+def test_simple_command_plugin_accepts_config_path_alias() -> None:
+    plugin = SimpleCommandPlugin(entrypoint=("python", "-m", "mypkg.train"))
+
+    command = plugin.build_commands_line(
+        {"experiment_id": "exp-1", "config_path": "configs/train.yaml"}, CommandBuildContext(gpus=1, hpc_type="cluster")
+    )
+
+    assert command == "python -m mypkg.train --config configs/train.yaml --orchestrator"
+
+
+def test_simple_command_plugin_missing_config_field_is_actionable() -> None:
+    plugin = SimpleCommandPlugin(entrypoint="python train.py")
+
+    with pytest.raises(ValueError) as excinfo:
+        plugin.build_commands_line({"experiment_id": "exp-1"}, CommandBuildContext(gpus=1, hpc_type="cluster"))
+
+    message = str(excinfo.value)
+    assert "config" in message
+    assert "config_arg=None" in message
+    assert "extra_command/command" in message
 
 
 def test_default_plugin_projects_target_status_and_display_metrics() -> None:
