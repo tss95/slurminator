@@ -3,19 +3,15 @@
 from __future__ import annotations
 
 import os
+import shutil
 import socket
 
 from slurminator.config import HPCType, determine_current_hpc
 
 
 def _is_cuda_available() -> bool:
-    """Best-effort CUDA availability check without requiring torch."""
-    try:
-        import torch
-
-        return bool(torch.cuda.is_available())
-    except Exception:
-        return False
+    """Best-effort GPU-node check without importing training frameworks."""
+    return shutil.which("nvidia-smi") is not None or shutil.which("rocm-smi") is not None
 
 
 def get_orchestrator_gpu_hpc_launch_block_message(
