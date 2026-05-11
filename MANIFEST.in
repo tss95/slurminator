@@ -1,0 +1,5 @@
+include LICENSE
+include README.md
+include CITATION.cff
+recursive-include docs *.md
+recursive-include scripts/templates *.yaml

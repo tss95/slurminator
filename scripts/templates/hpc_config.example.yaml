@@ -1,0 +1,31 @@
+# Example Slurminator cluster configuration.
+#
+# Copy this file to ~/.slurminator_config/hpc_config.yaml or pass it explicitly
+# with --hpc-config-file. Replace every example value with your own cluster
+# details. Do not commit real accounts, usernames, hostnames, or private paths
+# to a public repository.
+
+clusters:
+  OLIVIA:
+    partition: ACCEL
+    account: "my_allocation"
+    hostname: "login.example.org"
+    username: "my_username"
+    port: 22
+    repo_path: "/cluster/work/my_username/my_project"
+    save_path: "/cluster/work/my_username/my_project"
+    data_path: "/cluster/work/my_username/my_project/data"
+    environment_setup: "step_0.sh"
+    gpu_type: "a100"
+    gpu_count: 1
+    gpu_gres_name: "a100"
+    cpus_per_task: 4
+    base_memory_gb: 80
+    base_time_hours: 4
+    max_time_hours: 24
+
+    # Optional cluster policy fields.
+    exclude_nodes: []
+    pinned_datasets: []
+    dataset_resource_overrides: {}
+    sbatch_env: {}

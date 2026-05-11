@@ -38,11 +38,11 @@ def _write_hpc_config(path: Path, *, account: str = "acct") -> None:
 def test_load_user_config_finds_home_hpc_and_defaults_orchestrator(tmp_path: Path) -> None:
     home = tmp_path / "home"
     repo = tmp_path / "repo"
-    _write_hpc_config(home / ".slurminator" / "hpc_config.yaml")
+    _write_hpc_config(home / ".slurminator_config" / "hpc_config.yaml")
 
     loaded = load_user_config(repo_root=repo, home=home)
 
-    assert loaded.paths.hpc_config == home / ".slurminator" / "hpc_config.yaml"
+    assert loaded.paths.hpc_config == home / ".slurminator_config" / "hpc_config.yaml"
     assert loaded.paths.orchestrator_config is None
     assert loaded.cluster_configs[HPCType.FOX].partition == HPCPartition.ACCEL
     assert loaded.cluster_configs[HPCType.FOX].exclude_nodes == ["gpu-1", "gpu-2"]
@@ -54,7 +54,7 @@ def test_load_user_config_finds_home_hpc_and_defaults_orchestrator(tmp_path: Pat
 def test_find_user_config_prefers_override_when_provided(tmp_path: Path) -> None:
     home = tmp_path / "home"
     repo = tmp_path / "repo"
-    home_path = home / ".slurminator" / "hpc_config.yaml"
+    home_path = home / ".slurminator_config" / "hpc_config.yaml"
     override_path = tmp_path / "override.yaml"
     _write_hpc_config(home_path)
     _write_hpc_config(override_path, account="override")
@@ -62,6 +62,17 @@ def test_find_user_config_prefers_override_when_provided(tmp_path: Path) -> None
     found = find_user_config("hpc_config.yaml", override_path=override_path, repo_root=repo, home=home)
 
     assert found == override_path
+
+
+def test_find_user_config_keeps_legacy_home_fallback(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    legacy_path = home / ".slurminator" / "hpc_config.yaml"
+    _write_hpc_config(legacy_path)
+
+    found = find_user_config("hpc_config.yaml", repo_root=repo, home=home)
+
+    assert found == legacy_path
 
 
 def test_load_user_config_uses_repo_orchestrator_override(tmp_path: Path) -> None:

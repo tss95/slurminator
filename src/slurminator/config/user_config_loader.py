@@ -13,6 +13,8 @@ from slurminator.config.orchestrator_config import OrchestratorSettings, parse_o
 
 HPC_CONFIG_FILE = "hpc_config.yaml"
 ORCHESTRATOR_CONFIG_FILE = "orchestrator_config.yaml"
+USER_CONFIG_DIR = ".slurminator_config"
+LEGACY_USER_CONFIG_DIR = ".slurminator"
 
 
 @dataclass(frozen=True)
@@ -58,7 +60,7 @@ def find_user_config(
         return path
 
     home_root = Path(home).expanduser() if home is not None else Path.home()
-    candidates = [home_root / ".slurminator" / file_name]
+    candidates = [home_root / USER_CONFIG_DIR / file_name, home_root / LEGACY_USER_CONFIG_DIR / file_name]
     if repo_root is not None:
         candidates.append(Path(repo_root).expanduser() / "user_configs" / file_name)
     else:
@@ -72,7 +74,7 @@ def find_user_config(
         searched = ", ".join(str(candidate) for candidate in candidates)
         raise FileNotFoundError(
             f"Required {file_name} was not found. Searched: {searched}. "
-            "Copy scripts/templates/hpc_config.example.yaml to ~/.slurminator/hpc_config.yaml and edit it."
+            "Copy scripts/templates/hpc_config.example.yaml to ~/.slurminator_config/hpc_config.yaml and edit it."
         )
     return None
 
@@ -121,8 +123,10 @@ def load_user_config(
 
 __all__ = [
     "HPC_CONFIG_FILE",
+    "LEGACY_USER_CONFIG_DIR",
     "LoadedUserConfig",
     "ORCHESTRATOR_CONFIG_FILE",
+    "USER_CONFIG_DIR",
     "UserConfigPaths",
     "find_user_config",
     "load_hpc_config_file",

@@ -83,8 +83,9 @@ Partition overrides:
 Config lookup order is:
 
 1. explicit CLI config-file flags,
-2. `~/.slurminator/`,
-3. `<repo_root>/user_configs/` or `./user_configs/`.
+2. `~/.slurminator_config/`,
+3. legacy fallback `~/.slurminator/`,
+4. `<repo_root>/user_configs/` or `./user_configs/`.
 
 ## Generic Command Building
 

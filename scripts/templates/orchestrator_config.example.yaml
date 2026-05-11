@@ -1,0 +1,22 @@
+# Optional Slurminator behavior overrides.
+#
+# If this file is absent, Slurminator uses package defaults. Copy to
+# ~/.slurminator_config/orchestrator_config.yaml only when you need to adjust
+# dashboard, retry, or polling behavior.
+
+dashboard:
+  ui_version: v3
+  poll_interval_seconds: 2
+  timeout_risk:
+    min_progress: 0.1
+    min_runtime_minutes: 15
+    medium_ratio: 0.75
+    high_ratio: 0.9
+
+retry:
+  retry_timeout_with_estimated_time: false
+  timeout_retry_buffer: 1.3
+  timeout_retry_max_attempts: 1
+
+polling:
+  status_file_stale_threshold_seconds: 120

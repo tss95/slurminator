@@ -92,8 +92,9 @@ extension hooks.
 Create a user config:
 
 ```bash
-mkdir -p ~/.slurminator
-$EDITOR ~/.slurminator/hpc_config.yaml
+mkdir -p ~/.slurminator_config
+cp scripts/templates/hpc_config.example.yaml ~/.slurminator_config/hpc_config.yaml
+$EDITOR ~/.slurminator_config/hpc_config.yaml
 ```
 
 Minimal `hpc_config.yaml`:
@@ -189,9 +190,10 @@ Slurminator loads two user-facing YAML files:
 Config lookup order:
 
 1. Explicit CLI flags: `--hpc-config-file`, `--orchestrator-config-file`.
-2. `~/.slurminator/hpc_config.yaml` and
-   `~/.slurminator/orchestrator_config.yaml`.
-3. `<repo_root>/user_configs/` when `--repo-root` is provided, otherwise
+2. `~/.slurminator_config/hpc_config.yaml` and
+   `~/.slurminator_config/orchestrator_config.yaml`.
+3. Legacy fallback: `~/.slurminator/`.
+4. `<repo_root>/user_configs/` when `--repo-root` is provided, otherwise
    `./user_configs/`.
 
 Supported cluster identifiers currently match the built-in `HPCType` enum:
