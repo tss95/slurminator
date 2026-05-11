@@ -300,8 +300,8 @@ script name.
 ## Logging
 
 The Slurminator CLI configures a clickable-path console logger for the
-`slurminator` logger. The format is copied from PMT's logging style but kept as
-a separate package implementation, so PMT can retain its own `PMT` logger.
+`slurminator` logger. Log lines include a relative `path:line` location so
+warnings and errors can be traced back to the source quickly.
 
 Set `SLURMINATOR_LOG_LEVEL=DEBUG` (or `INFO`, `WARNING`, `ERROR`) to control
 Slurminator verbosity. If that variable is unset, `LOG_LEVEL` is used as a
