@@ -9,3 +9,4 @@ authors:
 repository-code: "https://github.com/tss95/slurminator"
 version: "0.1.0"
 date-released: "2026-05-11"
+license: "MIT"

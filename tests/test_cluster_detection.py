@@ -13,7 +13,7 @@ pytestmark = pytest.mark.unit
         ("foxlogin1", "foxlogin1.fox.educloud.no", HPCType.FOX),
         ("login-002", "login-002.lumi.csc.fi", HPCType.LUMI),
         ("nid001234", "nid001234", HPCType.LUMI),
-        ("login-1", "login-1.saga.sigma2.no", HPCType.SAGA),
+        ("login-1", "login-1.saga.example.org", HPCType.SAGA),
         ("uan02", "uan02.head.cm.americas.sgi.com", HPCType.OLIVIA),
         ("localhost", "localhost", None),
     ],

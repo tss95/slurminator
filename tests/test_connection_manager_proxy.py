@@ -74,9 +74,9 @@ def test_proxy_olivia_uses_standard_auth(monkeypatch):
     olivia_cfg = HPCClusterConfig(
         cluster_type=HPCType.OLIVIA,
         partition=HPCPartition.ACCEL,
-        account="nn8104k",
-        hostname="olivia.sigma2.no",
-        username="tordss",
+        account="demo_account",
+        hostname="olivia.example.org",
+        username="demo_user",
         repo_path=None,
         two_factor=False,
         proxy_jump="SAGA",
@@ -84,9 +84,9 @@ def test_proxy_olivia_uses_standard_auth(monkeypatch):
     saga_cfg = HPCClusterConfig(
         cluster_type=HPCType.SAGA,
         partition=HPCPartition.A100,
-        account="nn8104k",
-        hostname="saga.sigma2.no",
-        username="tordss",
+        account="demo_account",
+        hostname="saga.example.org",
+        username="demo_user",
         repo_path=None,
         two_factor=True,
     )
@@ -140,7 +140,7 @@ def test_direct_connection_keyboard_interactive_fallback(monkeypatch):
             pass
 
     mgr = HPCConnectionManager(configs={})
-    cfg = HPCConnectionConfig(hostname="olivia.sigma2.no", username="tordss", two_factor=False, use_key=False)
+    cfg = HPCConnectionConfig(hostname="olivia.example.org", username="demo_user", two_factor=False, use_key=False)
 
     mgr._standard_auth(DummySSHClient(), cfg)
 

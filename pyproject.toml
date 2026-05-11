@@ -9,6 +9,7 @@ authors = [{ name = "Tord Sture Stangeland" }]
 maintainers = [{ name = "Tord Sture Stangeland" }]
 description = "Reusable SLURM/HPC experiment orchestration package."
 readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.11"
 dependencies = [
   "paramiko>=3",

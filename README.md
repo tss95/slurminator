@@ -55,6 +55,10 @@ This repository is early but functional. PMT is currently the reference adopter,
 and the package is still stabilizing around that extraction. The public API may
 change before a tagged `0.1.0` release.
 
+## License
+
+Slurminator is released under the MIT License. See [LICENSE](LICENSE).
+
 ## Install
 
 Editable install from a sibling checkout:

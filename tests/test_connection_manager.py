@@ -332,7 +332,7 @@ def test_interactive_auth_retries_with_pam_after_default_failure(monkeypatch):
         def auth_interactive(self, _username, handler, submethods=None):
             calls.append(submethods)
             # Exercise prompt handler path
-            prompt_calls.append(handler("", "", [("One-time password (OATH) for `tordss':", False)]))
+            prompt_calls.append(handler("", "", [("One-time password (OATH) for `demo_user':", False)]))
             if submethods is None:
                 raise Exception("default interactive failed")
             return None

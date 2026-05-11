@@ -16,14 +16,14 @@ def test_olivia_provider_is_registered_by_default() -> None:
 
 def test_olivia_parse_sshare_output() -> None:
     raw = (
-        "nn8104k||billing=60000,gres/gpu=9000000|"
+        "demo_account||billing=60000,gres/gpu=9000000|"
         "cpu=58541523,mem=88443030459,energy=0,node=349293,billing=1042,"
         "fs/disk=0,vmem=0,pages=0,gres/gpu=1178031,gres/gpu:h200=1178031,gres/gpumem=0,gres/gpuutil=0\n"
-        "nn8104k|tordss||cpu=536680,mem=10962942293,energy=0,node=67085,billing=0,"
+        "demo_account|demo_user||cpu=536680,mem=10962942293,energy=0,node=67085,billing=0,"
         "fs/disk=0,vmem=0,pages=0,gres/gpu=134116,gres/gpu:h200=134116,gres/gpumem=0,gres/gpuutil=0\n"
     )
 
-    parsed = OliviaQuotaProvider.parse_sshare_output(raw, "nn8104k", today=date(2026, 4, 28))
+    parsed = OliviaQuotaProvider.parse_sshare_output(raw, "demo_account", today=date(2026, 4, 28))
 
     assert isinstance(parsed, QuotaSnapshot)
     assert parsed.hpc_type == HPCType.OLIVIA
