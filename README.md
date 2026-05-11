@@ -11,6 +11,30 @@ The package owns generic orchestration: config loading, SSH/SLURM submission,
 status ingestion, timeout handling, dashboard rendering, and quota display.
 Project-specific behavior enters through a small plugin interface.
 
+## Mental Model
+
+Slurminator separates *experiment intent* from *cluster execution*.
+
+1. You write a sweep YAML that describes what should be run: datasets, seeds,
+   named cases, and override values.
+2. Slurminator expands that sweep into an experiment-state YAML: one row per job,
+   with stable ids, resource metadata, status, and generated `sweep_params`.
+3. For each pending row, Slurminator asks the command builder or project plugin
+   to turn that row into a shell command.
+4. Slurminator submits that command through SLURM using the configured cluster,
+   resource defaults, environment script, and concurrency limits.
+5. The training script applies any forwarded config overrides, runs the
+   experiment, and can optionally write live status files through the callback.
+6. Slurminator polls scheduler state plus live status files, updates the
+   experiment-state YAML, and renders the dashboard. If the process stops, rerun
+   `--yaml <experiment-state.yaml>` to pick up where it left off.
+
+This is useful because paper sweeps become small, reviewable YAML artifacts
+instead of custom launch scripts. You can distribute or archive the sweep file,
+launch it with one Slurminator command, resume from the generated state file,
+and keep cluster-specific details in user config rather than in the experiment
+definition.
+
 ## Status
 
 This repository is early but functional. PMT is currently the reference adopter,
