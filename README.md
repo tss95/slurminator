@@ -101,6 +101,38 @@ See [docs/sweep_yaml.md](docs/sweep_yaml.md) for the full experiment-state and
 custom-sweep YAML formats, including multiple datasets, named cases, Cartesian
 parameter sweeps, and `--yaml` resume semantics.
 
+## Critical Sweep Contract
+
+Slurminator can generate sweep rows, but it does not know how to mutate your
+training framework's config. Generated custom sweeps store overrides in each
+experiment row as `sweep_params`, for example:
+
+```yaml
+sweep_params: "optimizer.lr=0.001;trainer.max_epochs=10"
+```
+
+Your command path must forward that string to the target training script, and
+the target script must parse and apply it before training starts. If this is
+missing, jobs still submit, but they run the base config.
+
+For simple commands, wire the override argument explicitly:
+
+```bash
+python -m slurminator \
+  --yaml experiment_lists/small.yaml \
+  --simple-command-entrypoint "python train.py" \
+  --simple-command-config-arg "--config" \
+  --simple-command-sweep-params-arg "--overrides" \
+  --olivia-limit 1
+```
+
+Then `train.py` must define and consume `--overrides`. Projects using Hydra,
+OmegaConf, Pydantic settings, or custom config loaders should map Slurminator's
+semicolon-separated `key=value` string into that system and fail clearly on
+unknown keys. See
+[docs/sweep_yaml.md](docs/sweep_yaml.md#minimal-target-script-support) for a
+minimal target-script parser.
+
 ## User Config
 
 Slurminator loads two user-facing YAML files:
@@ -147,6 +179,11 @@ python -m slurminator \
   --job-ram-gb 80
 ```
 
+`--sweepfile` creates an experiment-state YAML with row-level `sweep_params`.
+Those generated overrides only affect training if the command builder forwards
+them and your training entrypoint parses them. See
+[Critical Sweep Contract](#critical-sweep-contract).
+
 Override a partition for one run:
 
 ```bash
@@ -166,11 +203,14 @@ python -m slurminator \
   --yaml experiment_lists/small.yaml \
   --simple-command-entrypoint "python train.py" \
   --simple-command-config-arg "--config" \
+  --simple-command-sweep-params-arg "--overrides" \
   --olivia-limit 1
 ```
 
 With `SimpleCommandPlugin`, each experiment row should include `config` or
-`config_path`.
+`config_path`. If rows contain generated `sweep_params`, the
+`--simple-command-sweep-params-arg` value must match an argument parsed by your
+training script.
 
 ## Project Plugins
 
