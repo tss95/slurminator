@@ -12,6 +12,7 @@ from typing import Any
 
 import yaml
 
+from slurminator.config.cluster_registry import HPCPartition, HPCType
 from slurminator.experiments.status_enum import ExperimentStatus
 
 try:
@@ -68,6 +69,8 @@ def register_yaml_enum(enum_type: type[Enum], tag: str) -> None:
 
 
 register_yaml_enum(ExperimentStatus, "!ExperimentStatus")
+register_yaml_enum(HPCType, "!HPCType")
+register_yaml_enum(HPCPartition, "!HPCPartition")
 
 
 def load_yaml(path: str | Path) -> dict[str, Any]:
