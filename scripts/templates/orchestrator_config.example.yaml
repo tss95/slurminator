@@ -20,3 +20,13 @@ retry:
 
 polling:
   status_file_stale_threshold_seconds: 120
+
+# Optional generic command builder. If this is set and no project plugin is
+# selected, Slurminator can build commands without repeated CLI flags.
+command:
+  entrypoint: "python train.py"
+  config_field: "config"
+  config_arg: "--config"
+  sweep_params_arg: "--overrides"
+  extra_args: []
+  orchestrator_flag: "--orchestrator"

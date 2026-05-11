@@ -83,9 +83,16 @@ Partition overrides:
 Config lookup order is:
 
 1. explicit CLI config-file flags,
-2. `~/.slurminator_config/`,
-3. legacy fallback `~/.slurminator/`,
-4. `<repo_root>/user_configs/` or `./user_configs/`.
+2. `SLURMINATOR_HPC_CONFIG_FILE`, `SLURMINATOR_ORCHESTRATOR_CONFIG_FILE`,
+   and `SLURMINATOR_REPO_ROOT`,
+3. `~/.slurminator_config/`,
+4. legacy fallback `~/.slurminator/`,
+5. `<repo_root>/user_configs/` or `./user_configs/`.
+
+When a project plugin implements `default_repo_root()`, Slurminator uses that
+as the repo-root fallback before checking `./user_configs/`. `repo_path` in
+`hpc_config.yaml` remains the cluster-side execution path and is not used as
+the local repo root.
 
 ## Generic Command Building
 
@@ -146,6 +153,19 @@ a plugin. The same contract applies there: if a generated row has
 `sweep_params`, the plugin must either forward it to the training CLI or replace
 it with an equivalent resolved config.
 
+The simple command settings can also be stored in
+`orchestrator_config.yaml`, which avoids repeating `--simple-command-*` flags:
+
+```yaml
+command:
+  entrypoint: "python train.py"
+  config_field: "config"
+  config_arg: "--config"
+  sweep_params_arg: "--overrides"
+  extra_args: []
+  orchestrator_flag: "--orchestrator"
+```
+
 ## Plugin Discovery
 
 Projects can extend the CLI by setting:
@@ -173,6 +193,8 @@ A plugin may implement any of these optional CLI hooks:
   provided, Slurminator applies its generic `--sweepfile`/`--yaml`
   normalization. If you implement this hook and still support those generic
   modes, preserve the same validation.
+- `default_repo_root() -> str | Path | None`: provide a local repo root used for
+  `user_configs/` discovery when no CLI/env repo root is set.
 - `generate_experiment_yaml(args) -> str`: generate an experiment-state YAML
   from project-specific flags.
 - `run_sweep_mode(args, connection_manager) -> None`: handle an external sweep

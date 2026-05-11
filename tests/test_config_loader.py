@@ -64,6 +64,40 @@ def test_find_user_config_prefers_override_when_provided(tmp_path: Path) -> None
     assert found == override_path
 
 
+def test_load_user_config_accepts_env_overrides(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    hpc_path = tmp_path / "env_hpc.yaml"
+    orchestrator_path = tmp_path / "env_orchestrator.yaml"
+    _write_hpc_config(hpc_path, account="env-acct")
+    (orchestrator_path).write_text("dashboard:\n  ui_version: v2\n")
+
+    loaded = load_user_config(
+        home=home,
+        repo_root=repo,
+        env={
+            "SLURMINATOR_HPC_CONFIG_FILE": str(hpc_path),
+            "SLURMINATOR_ORCHESTRATOR_CONFIG_FILE": str(orchestrator_path),
+        },
+    )
+
+    assert loaded.paths.hpc_config == hpc_path
+    assert loaded.paths.orchestrator_config == orchestrator_path
+    assert loaded.cluster_configs[HPCType.FOX].account == "env-acct"
+    assert loaded.orchestrator.dashboard.ui_version == "v2"
+
+
+def test_load_user_config_uses_env_repo_root_for_repo_configs(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    _write_hpc_config(repo / "user_configs" / "hpc_config.yaml", account="repo-env")
+
+    loaded = load_user_config(home=home, env={"SLURMINATOR_REPO_ROOT": str(repo)})
+
+    assert loaded.paths.hpc_config == repo / "user_configs" / "hpc_config.yaml"
+    assert loaded.cluster_configs[HPCType.FOX].account == "repo-env"
+
+
 def test_find_user_config_keeps_legacy_home_fallback(tmp_path: Path) -> None:
     home = tmp_path / "home"
     repo = tmp_path / "repo"
@@ -133,3 +167,25 @@ def test_parse_embedded_orchestrator_config_clamps_timeout_values() -> None:
     assert settings.dashboard.timeout_risk.min_runtime_seconds == 1
     assert settings.dashboard.timeout_risk.medium_ratio == 0.0
     assert settings.dashboard.timeout_risk.high_ratio == 0.0
+
+
+def test_parse_command_settings_from_orchestrator_config() -> None:
+    settings = parse_orchestrator_settings(
+        {
+            "command": {
+                "entrypoint": "python train.py",
+                "config_arg": "--cfg",
+                "sweep_params_arg": "--overrides",
+                "extra_args": ["--quiet"],
+                "orchestrator_flag": "--from-slurminator",
+                "multi_experiment_flag": "--multi",
+            }
+        }
+    )
+
+    assert settings.command.entrypoint == "python train.py"
+    assert settings.command.config_arg == "--cfg"
+    assert settings.command.sweep_params_arg == "--overrides"
+    assert settings.command.extra_args == ("--quiet",)
+    assert settings.command.orchestrator_flag == "--from-slurminator"
+    assert settings.command.multi_experiment_flag == "--multi"

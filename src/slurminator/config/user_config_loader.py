@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,6 +17,9 @@ HPC_CONFIG_FILE = "hpc_config.yaml"
 ORCHESTRATOR_CONFIG_FILE = "orchestrator_config.yaml"
 USER_CONFIG_DIR = ".slurminator_config"
 LEGACY_USER_CONFIG_DIR = ".slurminator"
+HPC_CONFIG_FILE_ENV = "SLURMINATOR_HPC_CONFIG_FILE"
+ORCHESTRATOR_CONFIG_FILE_ENV = "SLURMINATOR_ORCHESTRATOR_CONFIG_FILE"
+REPO_ROOT_ENV = "SLURMINATOR_REPO_ROOT"
 
 
 @dataclass(frozen=True)
@@ -99,9 +104,15 @@ def load_user_config(
     orchestrator_config_file: str | Path | None = None,
     repo_root: str | Path | None = None,
     home: str | Path | None = None,
+    env: Mapping[str, str] | None = None,
     update_global_registry: bool = True,
 ) -> LoadedUserConfig:
     """Load the two user-facing Slurminator YAML files."""
+    env_map = os.environ if env is None else env
+    hpc_config_file = hpc_config_file or env_map.get(HPC_CONFIG_FILE_ENV)
+    orchestrator_config_file = orchestrator_config_file or env_map.get(ORCHESTRATOR_CONFIG_FILE_ENV)
+    repo_root = repo_root or env_map.get(REPO_ROOT_ENV)
+
     hpc_path = find_user_config(
         HPC_CONFIG_FILE, override_path=hpc_config_file, repo_root=repo_root, home=home, required=True
     )
@@ -123,9 +134,12 @@ def load_user_config(
 
 __all__ = [
     "HPC_CONFIG_FILE",
+    "HPC_CONFIG_FILE_ENV",
     "LEGACY_USER_CONFIG_DIR",
     "LoadedUserConfig",
     "ORCHESTRATOR_CONFIG_FILE",
+    "ORCHESTRATOR_CONFIG_FILE_ENV",
+    "REPO_ROOT_ENV",
     "USER_CONFIG_DIR",
     "UserConfigPaths",
     "find_user_config",

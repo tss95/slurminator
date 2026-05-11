@@ -146,6 +146,20 @@ See [docs/sweep_yaml.md](docs/sweep_yaml.md) for the full experiment-state and
 custom-sweep YAML formats, including multiple datasets, named cases, Cartesian
 parameter sweeps, and `--yaml` resume semantics.
 
+To avoid repeated command-builder flags, put simple command defaults in the
+optional `orchestrator_config.yaml`:
+
+```yaml
+command:
+  entrypoint: "python train.py"
+  config_arg: "--config"
+  sweep_params_arg: "--overrides"
+```
+
+Then rows with `config:` and optional `sweep_params:` can run without
+`--simple-command-*` CLI arguments. Use a plugin only when command construction,
+validation, tracker integration, or log interpretation is project-specific.
+
 ## Critical Sweep Contract
 
 Slurminator can generate sweep rows, but it does not know how to mutate your
@@ -190,11 +204,18 @@ Slurminator loads two user-facing YAML files:
 Config lookup order:
 
 1. Explicit CLI flags: `--hpc-config-file`, `--orchestrator-config-file`.
-2. `~/.slurminator_config/hpc_config.yaml` and
+2. Environment variables: `SLURMINATOR_HPC_CONFIG_FILE`,
+   `SLURMINATOR_ORCHESTRATOR_CONFIG_FILE`, and `SLURMINATOR_REPO_ROOT`.
+3. `~/.slurminator_config/hpc_config.yaml` and
    `~/.slurminator_config/orchestrator_config.yaml`.
-3. Legacy fallback: `~/.slurminator/`.
-4. `<repo_root>/user_configs/` when `--repo-root` is provided, otherwise
-   `./user_configs/`.
+4. Legacy fallback: `~/.slurminator/`.
+5. `<repo_root>/user_configs/` when `--repo-root`,
+   `SLURMINATOR_REPO_ROOT`, or a plugin default repo root is provided,
+   otherwise `./user_configs/`.
+
+`repo_path` inside `hpc_config.yaml` is the cluster-side project path used when
+submitting jobs. It is not the same thing as the local repo root used for config
+discovery.
 
 Supported cluster identifiers currently match the built-in `HPCType` enum:
 `FOX`, `LUMI`, `SAGA`, and `OLIVIA`. Adding a new identifier currently requires
@@ -258,6 +279,9 @@ With `SimpleCommandPlugin`, each experiment row should include `config` or
 `config_path`. If rows contain generated `sweep_params`, the
 `--simple-command-sweep-params-arg` value must match an argument parsed by your
 training script.
+
+The same settings can live under `command:` in `orchestrator_config.yaml`, so
+users do not need to repeat them on every launch.
 
 ## Project Plugins
 

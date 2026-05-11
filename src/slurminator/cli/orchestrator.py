@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from slurminator.base_orchestrator import BaseOrchestrator
-from slurminator.config import HPCType, HPC_CONFIGS, load_user_config
+from slurminator.config import HPCType, HPC_CONFIGS, OrchestratorSettings, REPO_ROOT_ENV, load_user_config
 from slurminator.connection_manager import HPCConnectionConfig, HPCConnectionManager
 from slurminator.experiments import CustomSweepConfig, MasterExperimentConfig
 from slurminator.experiments.yaml_utils import load_yaml
@@ -113,7 +113,7 @@ def build_base_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--simple-command-config-arg",
         type=str,
-        default="--config",
+        default=None,
         help="Config argument used by SimpleCommandPlugin. Use an empty string to disable.",
     )
     parser.add_argument(
@@ -170,11 +170,13 @@ def run_orchestrator_cli(
     else:
         _normalise_generic_generation_args(args)
 
+    loaded_config = None
     if load_configs:
-        load_user_config(
+        repo_root = args.repo_root or os.environ.get(REPO_ROOT_ENV) or _repo_root_from_plugin(discovered_plugin)
+        loaded_config = load_user_config(
             hpc_config_file=args.hpc_config_file,
             orchestrator_config_file=args.orchestrator_config_file,
-            repo_root=args.repo_root,
+            repo_root=repo_root,
         )
 
     if launch_guard is get_orchestrator_gpu_hpc_launch_block_message and discovered_plugin is not None:
@@ -220,7 +222,9 @@ def run_orchestrator_cli(
     elif discovered_plugin is not None:
         plugin = _configured_plugin_from_args(discovered_plugin, args)
     else:
-        plugin = _default_plugin_from_args(args)
+        plugin = _default_plugin_from_args(
+            args, orchestrator_settings=loaded_config.orchestrator if loaded_config is not None else None
+        )
     partition_overrides = parse_partition_overrides(args)
     orchestrator = orchestrator_cls(
         experiment_file=str(experiment_file),
@@ -297,6 +301,24 @@ def _get_optional_class(plugin: Any, hook_name: str, default: type[Any]) -> type
         resolved = value()
         return resolved if isinstance(resolved, type) else default
     return default
+
+
+def _repo_root_from_plugin(plugin: Any | None) -> str | None:
+    """Return a local repo-root default supplied by a project plugin."""
+    if plugin is None:
+        return None
+
+    hook = _get_optional_hook(plugin, "default_repo_root")
+    if hook is not None:
+        repo_root = hook()
+    else:
+        repo_root = getattr(plugin, "repo_root", None)
+        if callable(repo_root):
+            repo_root = repo_root()
+
+    if repo_root is None:
+        return None
+    return str(Path(repo_root).expanduser())
 
 
 def _configured_plugin_from_args(plugin: Any, args: argparse.Namespace) -> OrchestratorPlugin:
@@ -390,14 +412,32 @@ def _load_custom_sweeps(path: str) -> list[CustomSweepConfig]:
     return [CustomSweepConfig(**entry) for entry in sweeps_raw]
 
 
-def _default_plugin_from_args(args: argparse.Namespace) -> OrchestratorPlugin:
+def _default_plugin_from_args(
+    args: argparse.Namespace, *, orchestrator_settings: OrchestratorSettings | None = None
+) -> OrchestratorPlugin:
     """Return a generic command-building plugin from parsed CLI arguments."""
-    entrypoint = getattr(args, "simple_command_entrypoint", None)
+    command_settings = orchestrator_settings.command if orchestrator_settings is not None else None
+    entrypoint = getattr(args, "simple_command_entrypoint", None) or (
+        command_settings.entrypoint if command_settings is not None else None
+    )
     if entrypoint:
-        config_arg = getattr(args, "simple_command_config_arg", "--config")
-        sweep_params_arg = getattr(args, "simple_command_sweep_params_arg", None)
+        config_arg = getattr(args, "simple_command_config_arg", None)
+        if config_arg is None:
+            config_arg = command_settings.config_arg if command_settings is not None else "--config"
+        sweep_params_arg = getattr(args, "simple_command_sweep_params_arg", None) or (
+            command_settings.sweep_params_arg if command_settings is not None else None
+        )
         return SimpleCommandPlugin(
-            entrypoint=entrypoint, config_arg=config_arg or None, sweep_params_arg=sweep_params_arg or None
+            entrypoint=entrypoint,
+            config_field=command_settings.config_field if command_settings is not None else "config",
+            config_arg=config_arg or None,
+            extra_args=command_settings.extra_args if command_settings is not None else (),
+            experiment_args_field=(
+                command_settings.experiment_args_field if command_settings is not None else "command_args"
+            ),
+            sweep_params_arg=sweep_params_arg or None,
+            orchestrator_flag=command_settings.orchestrator_flag if command_settings is not None else "--orchestrator",
+            multi_experiment_flag=command_settings.multi_experiment_flag if command_settings is not None else None,
         )
     return DefaultOrchestratorPlugin()
 

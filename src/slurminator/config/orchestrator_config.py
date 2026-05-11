@@ -45,12 +45,27 @@ class PollSettings:
 
 
 @dataclass
+class CommandSettings:
+    """Generic SimpleCommandPlugin defaults."""
+
+    entrypoint: str | None = None
+    config_field: str = "config"
+    config_arg: str | None = "--config"
+    extra_args: tuple[str, ...] = ()
+    experiment_args_field: str = "command_args"
+    sweep_params_arg: str | None = None
+    orchestrator_flag: str | None = "--orchestrator"
+    multi_experiment_flag: str | None = None
+
+
+@dataclass
 class OrchestratorSettings:
     """Top-level generic orchestrator settings."""
 
     dashboard: DashboardSettings = field(default_factory=DashboardSettings)
     retry: RetrySettings = field(default_factory=RetrySettings)
     polling: PollSettings = field(default_factory=PollSettings)
+    command: CommandSettings = field(default_factory=CommandSettings)
 
 
 def _coerce_float(value: Any, default: float, name: str, *, logger: Any | None, source: Path | str | None) -> float:
@@ -93,6 +108,30 @@ def _coerce_bool(value: Any, default: bool) -> bool:
     return bool(value)
 
 
+def _coerce_optional_str(value: Any, default: str | None) -> str | None:
+    if value is None:
+        return default
+    text = str(value).strip()
+    return text or None
+
+
+def _coerce_str(value: Any, default: str) -> str:
+    if value is None:
+        return default
+    text = str(value).strip()
+    return text or default
+
+
+def _coerce_str_tuple(value: Any, default: tuple[str, ...]) -> tuple[str, ...]:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return tuple(part for part in value.split() if part)
+    if isinstance(value, (list, tuple)):
+        return tuple(str(part) for part in value if str(part).strip())
+    return default
+
+
 def _mapping_or_empty(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
@@ -107,6 +146,7 @@ def parse_orchestrator_settings(
     timeout_raw = _mapping_or_empty(dashboard_raw.get("timeout_risk"))
     retry_raw = _mapping_or_empty(orchestrator_raw.get("retry"))
     polling_raw = _mapping_or_empty(orchestrator_raw.get("polling"))
+    command_raw = _mapping_or_empty(orchestrator_raw.get("command"))
 
     timeout_defaults = TimeoutRiskSettings()
     min_runtime_seconds_raw = timeout_raw.get("min_runtime_seconds")
@@ -222,10 +262,31 @@ def parse_orchestrator_settings(
         ),
     )
 
-    return OrchestratorSettings(dashboard=dashboard_settings, retry=retry_settings, polling=polling_settings)
+    command_defaults = CommandSettings()
+    command_settings = CommandSettings(
+        entrypoint=_coerce_optional_str(command_raw.get("entrypoint"), command_defaults.entrypoint),
+        config_field=_coerce_str(command_raw.get("config_field"), command_defaults.config_field),
+        config_arg=_coerce_optional_str(command_raw.get("config_arg"), command_defaults.config_arg),
+        extra_args=_coerce_str_tuple(command_raw.get("extra_args"), command_defaults.extra_args),
+        experiment_args_field=_coerce_str(
+            command_raw.get("experiment_args_field"), command_defaults.experiment_args_field
+        ),
+        sweep_params_arg=_coerce_optional_str(command_raw.get("sweep_params_arg"), command_defaults.sweep_params_arg),
+        orchestrator_flag=_coerce_optional_str(
+            command_raw.get("orchestrator_flag"), command_defaults.orchestrator_flag
+        ),
+        multi_experiment_flag=_coerce_optional_str(
+            command_raw.get("multi_experiment_flag"), command_defaults.multi_experiment_flag
+        ),
+    )
+
+    return OrchestratorSettings(
+        dashboard=dashboard_settings, retry=retry_settings, polling=polling_settings, command=command_settings
+    )
 
 
 __all__ = [
+    "CommandSettings",
     "DashboardSettings",
     "OrchestratorSettings",
     "PollSettings",

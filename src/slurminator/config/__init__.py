@@ -12,6 +12,7 @@ from slurminator.config.cluster_registry import (
 )
 from slurminator.config.cluster_detection import determine_current_hpc, is_current_hpc
 from slurminator.config.orchestrator_config import (
+    CommandSettings,
     DashboardSettings,
     OrchestratorSettings,
     PollSettings,
@@ -20,7 +21,10 @@ from slurminator.config.orchestrator_config import (
     parse_orchestrator_settings,
 )
 from slurminator.config.user_config_loader import (
+    HPC_CONFIG_FILE_ENV,
     LoadedUserConfig,
+    ORCHESTRATOR_CONFIG_FILE_ENV,
+    REPO_ROOT_ENV,
     UserConfigPaths,
     find_user_config,
     load_hpc_config_file,
@@ -32,13 +36,17 @@ from slurminator.config.user_config_loader import (
 __all__ = [
     "DashboardSettings",
     "HPCClusterConfig",
+    "HPC_CONFIG_FILE_ENV",
     "HPCParameters",
     "HPCPartition",
     "HPCType",
     "HPC_CONFIGS",
     "LoadedUserConfig",
+    "CommandSettings",
     "OrchestratorSettings",
+    "ORCHESTRATOR_CONFIG_FILE_ENV",
     "PollSettings",
+    "REPO_ROOT_ENV",
     "ResourceStatus",
     "RetrySettings",
     "TimeoutRiskSettings",
