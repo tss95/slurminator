@@ -211,11 +211,7 @@ class OrchestratorStatusCallback:
     def _resolve_run_name(self, trainer: object | None) -> str:
         if self._run_name:
             return self._run_name
-        self._run_name = (
-            _clean_string(getattr(self.cfg, "run_name", None))
-            or self._experiment_id
-            or self._job_id
-        )
+        self._run_name = _clean_string(getattr(self.cfg, "run_name", None)) or self._experiment_id or self._job_id
         if not self._run_name:
             raise RuntimeError("Could not resolve display.run_name for orchestrator status.")
         return self._run_name

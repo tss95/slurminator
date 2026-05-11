@@ -96,8 +96,7 @@ def test_custom_sweep_named_cases(make_orchestrator):
                     name="stateful", overrides={"model.core.experiment_mode": "stateful", "loss.lambda_aux": 0.25}
                 ),
                 CustomSweepCase(
-                    name="stateless",
-                    overrides={"model.core.experiment_mode": "stateless", "loss.lambda_aux": 0.0},
+                    name="stateless", overrides={"model.core.experiment_mode": "stateless", "loss.lambda_aux": 0.0}
                 ),
             ],
         )

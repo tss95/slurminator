@@ -15,13 +15,7 @@ def test_clickable_path_handler_adds_relative_path(tmp_path) -> None:
 
     source = tmp_path / "pkg" / "module.py"
     record = logging.LogRecord(
-        name="slurminator-test",
-        level=logging.INFO,
-        pathname=str(source),
-        lineno=7,
-        msg="hello",
-        args=(),
-        exc_info=None,
+        name="slurminator-test", level=logging.INFO, pathname=str(source), lineno=7, msg="hello", args=(), exc_info=None
     )
 
     handler.handle(record)
@@ -36,12 +30,7 @@ def test_setup_clickable_logger_installs_single_console_handler(tmp_path) -> Non
 
     stream = StringIO()
     setup_clickable_logger(
-        tmp_path,
-        logger_name=logger_name,
-        logger_label="Test",
-        level=logging.INFO,
-        stream=stream,
-        force=True,
+        tmp_path, logger_name=logger_name, logger_label="Test", level=logging.INFO, stream=stream, force=True
     )
 
     logger.info("ready")

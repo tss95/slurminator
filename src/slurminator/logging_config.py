@@ -31,13 +31,7 @@ LOG_LEVELS = {
     "NOTSET": logging.NOTSET,
 }
 
-DEFAULT_LOG_COLORS = {
-    "DEBUG": "blue",
-    "INFO": "green",
-    "WARNING": "yellow",
-    "ERROR": "red",
-    "CRITICAL": "magenta",
-}
+DEFAULT_LOG_COLORS = {"DEBUG": "blue", "INFO": "green", "WARNING": "yellow", "ERROR": "red", "CRITICAL": "magenta"}
 
 
 class ClickablePathHandler(logging.StreamHandler):
@@ -72,36 +66,24 @@ def resolve_log_level(*, env_var: str = "SLURMINATOR_LOG_LEVEL", default: str = 
 def build_formatter(logger_label: str = "Slurminator") -> logging.Formatter:
     """Build Slurminator's aligned console formatter."""
     base_format = (
-        f"{logger_label} - %(clickable_file_line)-40s "
-        "- %(funcName)-20s "
-        "- %(levelname)-5s: "
-        "%(message)s"
+        f"{logger_label} - %(clickable_file_line)-40s " "- %(funcName)-20s " "- %(levelname)-5s: " "%(message)s"
     )
     if _HAS_COLORLOG:
         return colorlog.ColoredFormatter(  # type: ignore[union-attr]
-            "%(log_color)s" + base_format,
-            log_colors=DEFAULT_LOG_COLORS,
+            "%(log_color)s" + base_format, log_colors=DEFAULT_LOG_COLORS
         )
     return logging.Formatter(base_format)
 
 
 def build_logging_config(
-    *,
-    logger_name: str = "slurminator",
-    logger_label: str = "Slurminator",
-    level: str = "INFO",
+    *, logger_name: str = "slurminator", logger_label: str = "Slurminator", level: str = "INFO"
 ) -> dict[str, Any]:
     """Return a ``dictConfig``-compatible logging config.
 
     ``setup_clickable_logger`` or ``configure_logging`` should still be called
     afterward when clickable paths should be relative to a project root.
     """
-    fmt = (
-        f"{logger_label} - %(clickable_file_line)-40s "
-        "- %(funcName)-20s "
-        "- %(levelname)-5s: "
-        "%(message)s"
-    )
+    fmt = f"{logger_label} - %(clickable_file_line)-40s " "- %(funcName)-20s " "- %(levelname)-5s: " "%(message)s"
     formatter: dict[str, Any]
     if _HAS_COLORLOG:
         formatter = {
@@ -180,12 +162,7 @@ def configure_logging(
     force: bool = False,
 ) -> logging.Logger:
     """Configure Slurminator console logging if it is not already configured."""
-    return setup_clickable_logger(
-        project_root,
-        logger_name=logger_name,
-        logger_label=logger_label,
-        force=force,
-    )
+    return setup_clickable_logger(project_root, logger_name=logger_name, logger_label=logger_label, force=force)
 
 
 __all__ = [

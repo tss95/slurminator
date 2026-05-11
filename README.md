@@ -1,5 +1,7 @@
 # Slurminator
 
+[![CI](https://github.com/tss95/slurminator/actions/workflows/ci.yml/badge.svg)](https://github.com/tss95/slurminator/actions/workflows/ci.yml)
+
 **Author:** Tord Sture Stangeland
 **Affiliations:** NORSAR (primary); University of Oslo (PhD affiliation)
 

@@ -397,9 +397,7 @@ def _default_plugin_from_args(args: argparse.Namespace) -> OrchestratorPlugin:
         config_arg = getattr(args, "simple_command_config_arg", "--config")
         sweep_params_arg = getattr(args, "simple_command_sweep_params_arg", None)
         return SimpleCommandPlugin(
-            entrypoint=entrypoint,
-            config_arg=config_arg or None,
-            sweep_params_arg=sweep_params_arg or None,
+            entrypoint=entrypoint, config_arg=config_arg or None, sweep_params_arg=sweep_params_arg or None
         )
     return DefaultOrchestratorPlugin()
 
