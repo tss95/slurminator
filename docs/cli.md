@@ -1,0 +1,208 @@
+# CLI Reference And Extension Hooks
+
+Slurminator exposes both a console script and a module entrypoint:
+
+```bash
+slurminator --help
+python -m slurminator --help
+```
+
+Use `python -m slurminator` when the console script is not on `PATH`.
+
+## Input Selection
+
+Choose exactly one of the normal input modes:
+
+- `--yaml FILE`: run or resume an existing experiment-state YAML.
+- `--sweepfile FILE`: generate an experiment-state YAML from a custom-sweep
+  YAML, then run it.
+
+Compatibility aliases:
+
+- `--custom-sweep.file FILE`: alias for `--sweepfile`.
+- `--run-custom-sweeps`: compatibility flag implied by `--sweepfile`.
+
+Generation helpers:
+
+- `--config-profile NAME`: optional metadata/profile value copied into generated
+  rows.
+- `--num-epochs N`: optional generated-row epoch count for projects that use
+  epoch-based training.
+
+`--yaml` is the resume path. If an orchestrator session exits while jobs are
+still active, rerun with the same generated experiment-state YAML rather than
+regenerating from `--sweepfile`.
+
+## Resources And Retry Policy
+
+- `--n-gpus N`: GPUs per submitted job. Default: `1`.
+- `--job-time-hours HOURS`: override Slurm walltime for submitted jobs.
+- `--job-ram-gb GB`: override Slurm memory request.
+- `--retry-timeout-with-estimated-time`: relaunch timed-out jobs with walltime
+  estimated from observed progress.
+- `--timeout-retry-buffer FLOAT`: multiplicative safety factor for timeout
+  relaunches. Default: `1.3`.
+- `--timeout-retry-max-attempts N`: maximum timeout-based relaunch attempts per
+  experiment. Default: `1`.
+
+## Cluster Limits And Partitions
+
+The built-in cluster identifiers currently map to:
+
+- `--fox-limit N`
+- `--lumi-limit N`
+- `--saga-limit N`
+- `--olivia-limit N`
+
+Set only the limit for clusters you want this orchestrator session to use. A
+limit of `0` disables that cluster for the session.
+
+Partition overrides:
+
+- `--partition-override HPC=PARTITION`: override one cluster partition for this
+  run. May be repeated.
+- `--lumi-partition PARTITION`: compatibility alias for
+  `--partition-override LUMI=PARTITION`.
+
+## Runtime Behavior
+
+- `--poll-interval SECONDS`: scheduler polling interval. Default: `2`.
+- `--dashboard-ui v2|v3`: dashboard implementation. Default: `v3`.
+- `--dry-run`: generate and validate inputs, then exit without launching jobs.
+- `--debug`: enable debug mode.
+- `--no-prog`: reserved compatibility flag; currently ignored by the generic
+  orchestrator.
+
+## Config Discovery
+
+- `--hpc-config-file FILE`: explicit path to `hpc_config.yaml`.
+- `--orchestrator-config-file FILE`: explicit path to optional
+  `orchestrator_config.yaml`.
+- `--repo-root DIR`: repository root used when searching `user_configs/`.
+
+Config lookup order is:
+
+1. explicit CLI config-file flags,
+2. `~/.slurminator/`,
+3. `<repo_root>/user_configs/` or `./user_configs/`.
+
+## Generic Command Building
+
+For simple projects, avoid writing a plugin by using `SimpleCommandPlugin` from
+the CLI:
+
+```bash
+python -m slurminator \
+  --yaml experiment_lists/small.yaml \
+  --simple-command-entrypoint "python train.py" \
+  --simple-command-config-arg "--config" \
+  --olivia-limit 1
+```
+
+With this mode, each experiment row should include `config` or `config_path`:
+
+```yaml
+experiments:
+  - experiment_id: smoke
+    status: pending
+    task_type: train
+    dataset_name: smoke
+    config: configs/smoke.yaml
+```
+
+Flags:
+
+- `--simple-command-entrypoint COMMAND`: entrypoint such as
+  `python train.py`.
+- `--simple-command-config-arg ARG`: argument used before the row's `config` or
+  `config_path`. Default: `--config`. Use an empty string when the entrypoint
+  does not take a config argument.
+
+Explicit row-level `extra_command` or `command` always wins over
+`SimpleCommandPlugin`.
+
+## Plugin Discovery
+
+Projects can extend the CLI by setting:
+
+```bash
+export SLURMINATOR_PLUGIN="my_project.orchestrator:MyPlugin"
+python -m slurminator --yaml experiment_lists/small.yaml --olivia-limit 1
+```
+
+The value may use `module:ClassName` or `module.ClassName` syntax. Slurminator
+imports the object, instantiates it when it is a class, and requires at least a
+`build_commands_line(exp, context)` method.
+
+If `SLURMINATOR_PLUGIN` is unset, Slurminator uses the generic default plugin.
+
+## CLI Extension Hooks
+
+A plugin may implement any of these optional CLI hooks:
+
+- `pre_parse_argv(argv) -> list[str] | None`: rewrite raw arguments before
+  argparse runs. Use this for compatibility aliases or external sweep ids that
+  must be converted before parsing.
+- `extend_parser(parser) -> parser`: add project-specific flags.
+- `prepare_args(args) -> None`: normalize or validate parsed arguments. If not
+  provided, Slurminator applies its generic `--sweepfile`/`--yaml`
+  normalization. If you implement this hook and still support those generic
+  modes, preserve the same validation.
+- `generate_experiment_yaml(args) -> str`: generate an experiment-state YAML
+  from project-specific flags.
+- `run_sweep_mode(args, connection_manager) -> None`: handle an external sweep
+  mode and exit without starting the normal orchestrator. In the current CLI
+  this is triggered by a plugin-added `args.wandb_sweep` value.
+- `launch_guard() -> str | None`: return an error message to block launch, or
+  `None` to continue.
+- `configure_from_args(args) -> OrchestratorPlugin | None`: configure and return
+  the runtime plugin after parsing.
+- `orchestrator_cls`: class or method returning an `HPCOrchestrator` subclass.
+- `connection_manager_cls`: class or method returning an `HPCConnectionManager`
+  subclass.
+
+Example:
+
+```python
+from shlex import quote
+
+from slurminator.plugins import CommandBuildContext, DefaultOrchestratorPlugin
+
+
+class MyPlugin(DefaultOrchestratorPlugin):
+    def __init__(self) -> None:
+        self.project_name = "default"
+
+    def extend_parser(self, parser):
+        parser.add_argument("--project-name", default="default")
+        parser.add_argument("--train-entrypoint", default="python train.py")
+        return parser
+
+    def configure_from_args(self, args):
+        self.project_name = args.project_name
+        self.train_entrypoint = args.train_entrypoint
+        return self
+
+    def build_commands_line(self, exp, context: CommandBuildContext) -> str:
+        config = exp.get("config") or exp.get("config_path")
+        if not config:
+            raise ValueError(f"{exp.get('experiment_id')} is missing config/config_path.")
+        return (
+            f"{self.train_entrypoint} --config {quote(str(config))} "
+            f"--project {quote(str(self.project_name))} --orchestrator"
+        )
+```
+
+## Runtime Plugin Methods
+
+The core runtime plugin surface is intentionally small:
+
+- `validate_experiment(exp, overrides) -> bool`
+- `build_commands_line(exp, context) -> str`
+- `prepare_remote_runtime(hpc_type=..., connection_manager=...) -> None`
+- `interpret_log_tail(exp=..., log_tail=..., current_status=..., stage=...)`
+- `annotate_log_tail(exp=..., log_tail=...) -> None`
+
+Most adopters start with explicit `extra_command` rows or
+`SimpleCommandPlugin`. Add a custom plugin only when the command line, validation
+rules, tracker integration, or log interpretation cannot be expressed as data.

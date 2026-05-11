@@ -25,6 +25,38 @@ experiments:
     extra_command: "python train.py --config cfg/smoke.yaml --orchestrator"
 ```
 
+One state file can contain many unrelated experiments. They do not have to come
+from the same sweep, dataset, task type, or command style:
+
+```yaml
+experiments:
+  - experiment_id: image_smoke_resnet
+    status: pending
+    task_type: classification
+    dataset_name: cifar10
+    config: configs/cifar10_resnet.yaml
+
+  - experiment_id: tabular_smoke_xgb
+    status: pending
+    task_type: tabular
+    dataset_name: fraud_small
+    extra_command: "python train_tabular.py --config configs/fraud_xgb.yaml"
+
+  - experiment_id: text_smoke_transformer
+    status: pending
+    task_type: language_modeling
+    dataset_name: tiny_text
+    command: "python train_text.py --dataset tiny_text --max-steps 500"
+    resource_overrides:
+      gpu_count: 1
+      memory_gb: 40
+      time_hours: 2
+```
+
+This is the simplest way to run several independent canaries under one
+dashboard. The orchestrator treats every row independently and uses
+`experiment_id` as the stable row key.
+
 Each row is one schedulable job. Slurminator owns the scheduler fields and may
 rewrite them while running:
 
@@ -93,17 +125,16 @@ A generic custom sweep file is a mapping with `custom_sweeps:`:
 
 ```yaml
 custom_sweeps:
-  - experiment_prefix: har_loss_ab
-    task_type: self_supervised
-    datasets: [HAR]
+  - experiment_prefix: optimizer_ablation
+    task_type: train
+    datasets: [cifar10]
     seeds: [42]
     num_epochs: 10
     base_overrides:
-      training_configs.max_train_steps: 1000
-      training_configs.pseudo_epoch_steps: 100
+      trainer.max_epochs: 10
     sweep_keys:
-      loss.alpha: [0.0, 0.5]
-      loss.beta: [0.0, 0.5]
+      optimizer.name: [adamw, sgd]
+      optimizer.lr: [0.001, 0.0003]
 ```
 
 This expands as:
@@ -112,9 +143,8 @@ This expands as:
 datasets x Cartesian product(sweep_keys) x seeds
 ```
 
-For the example above, Slurminator creates four rows for `HAR`: `(alpha=0,
-beta=0)`, `(alpha=0, beta=0.5)`, `(alpha=0.5, beta=0)`, and `(alpha=0.5,
-beta=0.5)`, each with seed `42`.
+For the example above, Slurminator creates four rows for `cifar10`: two
+optimizer names times two learning rates, each with seed `42`.
 
 Important fields:
 
@@ -128,15 +158,64 @@ Important fields:
 - `seeds`: exact seed list to generate for every row.
 - `num_seeds`: truncate or extend the default seed list to this count. If
   `seeds` is explicitly provided, `num_seeds` must match its length.
-- `num_epochs`: default epoch count when no explicit step-budget horizon is
-  inferable.
+- `num_epochs`: default epoch count copied into generated rows when your
+  project command uses epoch-based training.
 - `config_profile`: project profile metadata copied into generated rows.
 - `run_name_prefix`, `run_name_suffix`, and `parameters_prefix`: naming helpers.
 - `resume_from`: scalar checkpoint path, or a dataset-scoped mapping.
 
-Override keys may use dot notation (`training_configs.max_train_steps`) or
-double-underscore notation (`training_configs__max_train_steps`). The generator
-normalizes double underscores to dots.
+Override keys may use dot notation (`trainer.max_steps`) or double-underscore
+notation (`trainer__max_steps`). The generator normalizes double underscores to
+dots.
+
+Sweep override keys are otherwise opaque. Slurminator builds the override string
+and passes it to the configured command builder; your training code or project
+plugin decides what the keys mean.
+
+## Multiple Sweep Blocks
+
+One custom-sweep YAML can describe several separate experiment families:
+
+```yaml
+custom_sweeps:
+  - experiment_prefix: optimizer_ablation
+    task_type: train
+    datasets: [cifar10, fashion_mnist]
+    seeds: [42]
+    base_overrides:
+      trainer.max_epochs: 20
+    sweep_keys:
+      optimizer.name: [adamw, sgd]
+      optimizer.lr: [0.001, 0.0003]
+
+  - experiment_prefix: model_size_canary
+    task_type: train
+    datasets: [cifar10]
+    seeds: [42, 45]
+    cases:
+      - name: tiny
+        overrides:
+          model.width: 64
+          model.depth: 4
+      - name: small
+        overrides:
+          model.width: 128
+          model.depth: 6
+
+  - experiment_prefix: eval_only
+    task_type: evaluation
+    dataset_name: cifar10
+    seeds: [42]
+    cases:
+      - name: baseline_checkpoint
+        resume_from: /path/to/baseline.ckpt
+        overrides:
+          eval.split: test
+```
+
+Each block expands independently. The resulting rows are written into one
+experiment-state YAML, so they can be submitted, monitored, paused, and resumed
+together.
 
 ## Multiple Datasets
 
@@ -146,7 +225,7 @@ Use `datasets` to run one sweep block across several datasets:
 custom_sweeps:
   - experiment_prefix: backbone_canary
     task_type: train
-    datasets: [HAR, FordA, FordB]
+    datasets: [cifar10, fashion_mnist, mnist]
     seeds: [42, 45]
     sweep_keys:
       model.backbone: [small, base]
@@ -164,11 +243,10 @@ Dataset-scoped values can use a mapping with exact dataset names plus optional
 ```yaml
 custom_sweeps:
   - experiment_prefix: resumed_probe
-    datasets: [HAR, FordA]
-    checkpoint_probe: true
+    datasets: [cifar10, fashion_mnist]
     resume_from:
-      HAR: /path/to/har.ckpt
-      FordA: /path/to/forda.ckpt
+      cifar10: /path/to/cifar10.ckpt
+      fashion_mnist: /path/to/fashion_mnist.ckpt
 ```
 
 If a dataset-scoped mapping omits the current dataset and has no `default` or
@@ -182,31 +260,30 @@ of overrides:
 
 ```yaml
 custom_sweeps:
-  - experiment_prefix: loss_ab
-    datasets: [HAR]
+  - experiment_prefix: augmentation_ablation
+    datasets: [cifar10]
     seeds: [42]
     base_overrides:
-      training_configs.max_train_steps: 1000
-      training_configs.pseudo_epoch_steps: 100
+      trainer.max_epochs: 20
     cases:
-      - name: alpha_only
+      - name: color_only
         overrides:
-          loss.alpha: 0.5
-          loss.beta: 0.0
-      - name: beta_only
+          augmentation.color_jitter: true
+          augmentation.random_crop: false
+      - name: crop_only
         overrides:
-          loss.alpha: 0.0
-          loss.beta: 0.5
+          augmentation.color_jitter: false
+          augmentation.random_crop: true
       - name: combined
         base_overrides:
-          loss.alpha: 0.5
+          augmentation.color_jitter: true
         overrides:
-          loss.beta: 0.5
+          augmentation.random_crop: true
 ```
 
 Cases are useful for nested experiments because each case can carry its own
-`base_overrides`, `overrides`, `resume_from`, `checkpoint_probe`, and
-`checkpoint_probe_epoch_offset`.
+`base_overrides`, `overrides`, `resume_from`, and project-specific extension
+fields consumed by your adapter.
 
 Current expansion semantics are deliberately simple:
 
@@ -217,24 +294,40 @@ Current expansion semantics are deliberately simple:
 - It does **not** multiply `cases x sweep_keys`. If you need named nested
   variants, write those combinations as explicit `cases`.
 
-## Step-Budget Sweeps
+## Epochs, Steps, And Progress
 
-For step-budget runs, provide both:
+Slurminator's sweep generator does not train models itself. Values such as
+`trainer.max_epochs`, `trainer.max_steps`, or `scheduler.warmup_steps` are just
+override keys passed through to your project command.
+
+Use `num_epochs` when you want generated rows to carry a default epoch horizon:
 
 ```yaml
-training_configs.max_train_steps: 1000
-training_configs.pseudo_epoch_steps: 100
+custom_sweeps:
+  - experiment_prefix: short_canary
+    datasets: [cifar10]
+    num_epochs: 5
+    sweep_keys:
+      optimizer.lr: [0.001, 0.0003]
 ```
 
-If `training_configs.num_epochs` is not set, Slurminator infers the epoch
-horizon as:
+For live dashboard progress, the status callback is the source of truth. It
+writes either epoch-based or step-based progress:
 
-```text
-ceil(max_train_steps / pseudo_epoch_steps)
+```python
+from slurminator.callbacks.status_normalization import GenericProgressSnapshot
+
+progress = GenericProgressSnapshot(
+    unit="step",
+    current_step=global_step,
+    total_steps=max_steps,
+)
 ```
 
-If only one of `max_train_steps` and `pseudo_epoch_steps` is provided,
-generation fails. This keeps dashboard progress and training horizons aligned.
+Project adapters may add convenience rules for deriving an epoch horizon from
+their own training-limit fields, but that is adapter policy. The portable
+contract is: sweep YAML passes opaque overrides, and callbacks report actual
+progress.
 
 ## Practical Workflow
 
@@ -250,3 +343,6 @@ generation fails. This keeps dashboard progress and training horizons aligned.
    passing the generated file with `--yaml`.
 5. If the orchestrator stops or your session disconnects, resume with `--yaml`
    and the same generated experiment-state file.
+
+For live metric collection and dashboard metric-key configuration, see
+[`docs/status_callback.md`](status_callback.md).

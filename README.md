@@ -40,6 +40,9 @@ python -m slurminator --help
 
 If the console script is not on `PATH`, use `python -m slurminator`.
 
+See [docs/cli.md](docs/cli.md) for the full built-in CLI reference and plugin
+extension hooks.
+
 ## Quickstart
 
 Create a user config:
@@ -233,6 +236,10 @@ To collect live metrics in the dashboard, include
 `slurminator.callbacks.status_callback.OrchestratorStatusCallback` in your
 training loop, or subclass it for project-specific display metrics and tracker
 links.
+
+See [docs/status_callback.md](docs/status_callback.md) for a complete callback
+integration example, including primary/secondary tracking metric keys and
+display metadata.
 
 Minimal framework-neutral pattern:
 
