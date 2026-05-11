@@ -88,6 +88,28 @@ The generic Slurminator launcher sets the scheduler-side variables. Project
 launch code should ensure `SAVE_PATH` and, when useful, the orchestrator
 experiment identifiers are exported into the job environment.
 
+## Optional Config Context
+
+The `cfg` constructor argument is optional. The base callback stores it as
+`self.cfg`, and `on_train_start()` refreshes it from `trainer.cfg` or
+`trainer.config` when either attribute exists:
+
+```text
+self.cfg = trainer.cfg or trainer.config or constructor_cfg
+```
+
+Use `cfg` as project context, not as a required Slurminator schema. Generic
+callbacks can pass `cfg=None` and provide identity values through constructor
+arguments or environment variables.
+
+If a subclass depends on config fields, resolve them defensively and fail with a
+clear project error when they are required:
+
+```python
+def _project_cfg(self, trainer):
+    return getattr(trainer, "cfg", None) or getattr(trainer, "config", None) or self.cfg
+```
+
 ## Metric Keys And Display Metadata
 
 Status files contain two related metric sections:
@@ -216,7 +238,8 @@ class ProjectStatusCallback(OrchestratorStatusCallback):
     def _resolve_display_candidates(self, trainer) -> None:
         super()._resolve_display_candidates(trainer)
 
-        task_type = getattr(self.cfg, "task_type", "classification")
+        cfg = getattr(trainer, "cfg", None) or getattr(trainer, "config", None) or self.cfg
+        task_type = getattr(cfg, "task_type", "classification")
 
         if task_type == "classification":
             self._primary_metric = "val/accuracy"
