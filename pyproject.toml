@@ -15,6 +15,9 @@ dependencies = [
   "rich>=13",
 ]
 
+[project.scripts]
+slurminator = "slurminator.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
