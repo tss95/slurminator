@@ -53,3 +53,12 @@ provider for that cluster.
 compare the active sweep's worst-case remaining GPU-hour spend against the
 quota. Providers for CPU-hour, node-hour, or site-specific charge models should
 set `worst_case_unit=None` until they provide a matching estimator.
+
+The built-in worst-case estimator is deliberately simple: it multiplies each
+unfinished experiment's requested walltime by its requested GPU count. It does
+not know how a site actually bills usage. Some systems charge differently by
+partition, charge full nodes even when only part of a node is requested, require
+a minimum GPU count per node, or apply other local allocation rules. For those
+systems, leave `worst_case_unit=None` unless your provider also supplies a
+matching charge estimator. The dashboard quota footer should be treated as an
+early warning and sanity check, not as authoritative billing.

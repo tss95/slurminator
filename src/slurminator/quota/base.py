@@ -12,7 +12,13 @@ from slurminator.config.cluster_registry import coerce_hpc_type
 
 @dataclass(frozen=True)
 class QuotaSnapshot:
-    """A cluster budget snapshot suitable for dashboard rendering."""
+    """A cluster budget snapshot suitable for dashboard rendering.
+
+    ``worst_case_unit`` should only be set when the dashboard's literal
+    walltime-by-resource estimate matches the cluster's charging model closely
+    enough to be useful. Set it to ``None`` for partition, node, or site-specific
+    billing rules that need a custom estimator.
+    """
 
     hpc_type: HPCType
     cluster_name: str

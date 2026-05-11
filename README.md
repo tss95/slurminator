@@ -383,6 +383,12 @@ optional quota providers. Slurminator ships with an OLIVIA/Sigma2 provider and
 custom providers can be registered for other clusters. See
 [`docs/quota_providers.md`](docs/quota_providers.md).
 
+Quota warnings are approximate. The dashboard estimates remaining sweep cost
+from literal requested walltime and GPU counts; it does not model site-specific
+charging rules such as partition multipliers, full-node charging, or minimum GPU
+counts per node. Treat the quota footer as an early warning and sanity check,
+not as an authoritative accounting statement.
+
 ## Development
 
 Run package tests:
