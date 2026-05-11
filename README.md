@@ -210,12 +210,53 @@ script name.
 Jobs can write live status files using Slurminator's callback helpers under:
 
 ```text
-$SAVE_PATH/.orchestrator_status_v2/<sweep_id>/status_<job_id>.json
+$SAVE_PATH/.orchestrator_status[/sweep_<sweep_id>]/status_<job_id>.json
 ```
 
 The target schema lives in `slurminator.schemas.status_schema`. Status files are
 optional but improve dashboard progress, metrics, links, and live speed display.
 Without them, scheduler state still drives terminal status.
+
+### Wiring The Metrics Callback
+
+To collect live metrics in the dashboard, include
+`slurminator.callbacks.status_callback.OrchestratorStatusCallback` in your
+training loop, or subclass it for project-specific display metrics and tracker
+links.
+
+Minimal framework-neutral pattern:
+
+```python
+from slurminator.callbacks.status_callback import OrchestratorStatusCallback
+
+status_cb = OrchestratorStatusCallback(cfg=cfg)
+status_cb.on_train_start(trainer)
+
+for epoch in range(num_epochs):
+    for batch_idx, batch in enumerate(loader):
+        logs = train_one_batch(batch)
+        status_cb.on_train_batch_end(trainer, batch, batch_idx, logs)
+    status_cb.on_epoch_end(trainer, epoch, train_logs, val_logs)
+
+status_cb.on_train_end(trainer)
+```
+
+The callback accepts explicit constructor values for `save_path`, `job_id`,
+`sweep_id`, `experiment_id`, `primary_metric`, `secondary_metric`, and
+`metric_info`. If omitted, it resolves identity from environment variables:
+
+- `SAVE_PATH` for the output root.
+- `SLURM_JOB_ID`, `PBS_JOBID`, or `JOB_ID` for the job id.
+- `ORCHESTRATOR_SWEEP_ID` or `SWEEP_ID` for optional sweep grouping.
+- `ORCHESTRATOR_EXPERIMENT_ID` or `EXPERIMENT_ID` for the displayed experiment.
+
+Only flat, finite numeric metrics are written. Booleans, nested values, NaN, and
+infinities are ignored. Display metadata is strict: a metric's display info is
+materialized only after that metric key exists in the numeric `metrics` block.
+
+Use `update_metrics(metrics, trainer=trainer)` for late metrics produced outside
+the normal epoch hook. Subclasses usually override `_resolve_links()`,
+`_resolve_display_candidates()`, and, when needed, `_build_progress_snapshot()`.
 
 ## Dashboard Quota Providers
 
