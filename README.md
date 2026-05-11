@@ -94,6 +94,10 @@ python -m slurminator \
 
 Remove `--dry-run` only when you intentionally want to submit jobs.
 
+See [docs/sweep_yaml.md](docs/sweep_yaml.md) for the full experiment-state and
+custom-sweep YAML formats, including multiple datasets, named cases, Cartesian
+parameter sweeps, and `--yaml` resume semantics.
+
 ## User Config
 
 Slurminator loads two user-facing YAML files:
@@ -125,6 +129,9 @@ python -m slurminator \
   --olivia-limit 1 \
   --n-gpus 1
 ```
+
+`--yaml` is also the resume path. Re-run it against the same experiment-state
+YAML to reconnect to queued/running jobs and continue submitting pending rows.
 
 Generate an experiment list from a custom sweep file:
 
