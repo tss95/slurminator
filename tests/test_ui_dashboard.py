@@ -1,4 +1,3 @@
-from datetime import date
 from types import SimpleNamespace
 
 import pytest
@@ -50,10 +49,6 @@ def test_dashboard_active_hpcs_includes_orchestrator_limits() -> None:
     dash.orchestrator = SimpleNamespace(concurrency_limits={HPCType.OLIVIA: 1})
 
     assert dash._active_hpcs([]) == {HPCType.OLIVIA}
-
-
-def test_dashboard_allocation_period_end_date() -> None:
-    assert TerminalDashboard._sigma2_allocation_period_end_date(date(2026, 4, 28)) == date(2026, 9, 30)
 
 
 def test_dashboard_format_state_for_status_enum() -> None:

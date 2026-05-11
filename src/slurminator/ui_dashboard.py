@@ -27,6 +27,7 @@ from rich import box as _box  # type: ignore
 from slurminator.config import HPCType, HPC_CONFIGS
 from slurminator.experiments import ExperimentStatus
 from slurminator.experiments.yaml_utils import load_yaml
+from slurminator.quota import QuotaProvider, QuotaSnapshot, get_quota_provider
 
 # ------------------------------------------------------------------
 # UI Layout Configuration - Adjust these values to customize display
@@ -150,8 +151,8 @@ class TerminalDashboard:
                 self.timeout_risk_medium_ratio, float(getattr(timeout_cfg, "high_ratio", self.timeout_risk_high_ratio))
             )
         # Cache expensive HPC quota probes to keep UI refreshes lightweight.
-        # Key: HPCType, Value: (timestamp, snapshot-dict-or-None)
-        self._gpu_quota_cache: dict[HPCType, tuple[float, dict[str, float] | None]] = {}
+        # Key: HPCType, Value: (timestamp, provider-snapshot-or-None)
+        self._quota_cache: dict[HPCType, tuple[float, QuotaSnapshot | None]] = {}
 
     # ------------------------------------------------------------------
     # Public API: mount and render
@@ -306,16 +307,16 @@ class TerminalDashboard:
         slurm_request_label = self._slurm_request_label(exps)
         if slurm_request_label:
             second_line_parts.append(slurm_request_label)
-        gpu_quota_label = self._gpu_quota_label(exps)
+        quota_label = self._quota_label(exps)
         oom_legend = "* = recovered from OOM" if self._has_oom_recovery(exps) else None
         if oom_legend:
             second_line_parts.append(oom_legend)
-        if second_line_parts and gpu_quota_label:
-            footer_renderable = f"{footer_line}\n{' • '.join(second_line_parts)}\n{gpu_quota_label}"
+        if second_line_parts and quota_label:
+            footer_renderable = f"{footer_line}\n{' • '.join(second_line_parts)}\n{quota_label}"
         elif second_line_parts:
             footer_renderable = f"{footer_line}\n{' • '.join(second_line_parts)}"
-        elif gpu_quota_label:
-            footer_renderable = f"{footer_line}\n{gpu_quota_label}"
+        elif quota_label:
+            footer_renderable = f"{footer_line}\n{quota_label}"
         else:
             footer_renderable = footer_line
         layout["footer"].update(footer_renderable)
@@ -421,16 +422,16 @@ class TerminalDashboard:
         slurm_request_label = self._slurm_request_label(exps)
         if slurm_request_label:
             second_line_parts.append(slurm_request_label)
-        gpu_quota_label = self._gpu_quota_label(exps)
+        quota_label = self._quota_label(exps)
         oom_legend = "* = recovered from OOM" if self._has_oom_recovery(exps) else None
         if oom_legend:
             second_line_parts.append(oom_legend)
-        if second_line_parts and gpu_quota_label:
-            footer_renderable = f"{footer_line}\n{' • '.join(second_line_parts)}\n{gpu_quota_label}"
+        if second_line_parts and quota_label:
+            footer_renderable = f"{footer_line}\n{' • '.join(second_line_parts)}\n{quota_label}"
         elif second_line_parts:
             footer_renderable = f"{footer_line}\n{' • '.join(second_line_parts)}"
-        elif gpu_quota_label:
-            footer_renderable = f"{footer_line}\n{gpu_quota_label}"
+        elif quota_label:
+            footer_renderable = f"{footer_line}\n{quota_label}"
         else:
             footer_renderable = footer_line
         layout["footer"].update(footer_renderable)
@@ -728,86 +729,12 @@ class TerminalDashboard:
         return f"[cyan]Slurm[/]: h={hours_txt} ram={ram_txt} gpu={gpu_txt}"
 
     @staticmethod
-    def _parse_tres_map(raw_tres: str) -> dict[str, float | None]:
-        """Parse Slurm TRES CSV (`k=v,...`) into a key/value dict."""
-        parsed: dict[str, float | None] = {}
-        if not raw_tres:
-            return parsed
-        for token in raw_tres.split(","):
-            token = token.strip()
-            if not token or "=" not in token:
-                continue
-            key, value = token.split("=", 1)
-            key = key.strip()
-            value = value.strip()
-            if not key:
-                continue
-            if value.upper() == "N":
-                parsed[key] = None
-                continue
-            try:
-                parsed[key] = float(value)
-            except ValueError:
-                continue
-        return parsed
-
-    @staticmethod
-    def _extract_gpu_tres_value(tres_map: dict[str, float | None]) -> float | None:
-        """Return first concrete GPU TRES value from parsed Slurm map."""
-        preferred_keys = ("gres/gpu", "gres/gpu:h200")
-        for key in preferred_keys:
-            value = tres_map.get(key)
-            if value is not None:
-                return value
-        for key, value in tres_map.items():
-            if key.startswith("gres/gpu") and value is not None:
-                return value
-        return None
-
-    @classmethod
-    def _parse_olivia_gpu_quota_snapshot(cls, raw_output: str, account: str) -> dict[str, float] | None:
-        """Parse `sshare -P` row for account-level Olivia GPU quota."""
-        if not raw_output:
-            return None
-        account_norm = (account or "").strip()
-        if not account_norm:
-            return None
-
-        for raw_line in raw_output.splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-            parts = line.split("|")
-            if len(parts) < 4:
-                continue
-            account_field = parts[0].strip()
-            user_field = parts[1].strip()
-            if account_field != account_norm or user_field:
-                # We only want the account aggregate row (empty user).
-                continue
-            limit_map = cls._parse_tres_map(parts[2])
-            used_map = cls._parse_tres_map(parts[3])
-            limit_minutes = cls._extract_gpu_tres_value(limit_map)
-            used_minutes = cls._extract_gpu_tres_value(used_map)
-            if limit_minutes is None or used_minutes is None:
-                continue
-            if limit_minutes <= 0:
-                continue
-            remaining_minutes = max(limit_minutes - used_minutes, 0.0)
-            return {
-                "limit_minutes": limit_minutes,
-                "used_minutes": used_minutes,
-                "remaining_minutes": remaining_minutes,
-            }
-        return None
-
-    @staticmethod
-    def _fmt_gpu_hours(hours: float) -> str:
-        if hours >= 100:
-            return f"{hours:,.0f}"
-        if hours >= 10:
-            return f"{hours:.1f}"
-        return f"{hours:.2f}"
+    def _fmt_quota_amount(value: float) -> str:
+        if value >= 100:
+            return f"{value:,.0f}"
+        if value >= 10:
+            return f"{value:.1f}"
+        return f"{value:.2f}"
 
     @staticmethod
     def _quota_label_text(label: str) -> str:
@@ -836,15 +763,16 @@ class TerminalDashboard:
                             active.add(hpc)
         return active
 
-    def _get_olivia_gpu_quota_snapshot(self, exps: List[dict]) -> dict[str, float] | None:
-        """Fetch/cached project GPU quota snapshot for Olivia."""
+    def _get_quota_snapshot(self, hpc_type: HPCType) -> QuotaSnapshot | None:
+        """Fetch/cached quota snapshot for one cluster."""
         if self.orchestrator is None:
             return None
-        if HPCType.OLIVIA not in self._active_hpcs(exps):
+        provider = get_quota_provider(hpc_type)
+        if provider is None:
             return None
 
         now = time.time()
-        cached = self._gpu_quota_cache.get(HPCType.OLIVIA)
+        cached = self._quota_cache.get(hpc_type)
         if cached is not None:
             cache_ts, cache_data = cached
             if now - cache_ts < GPU_QUOTA_POLL_INTERVAL_SECONDS:
@@ -852,28 +780,17 @@ class TerminalDashboard:
 
         connection_manager = getattr(self.orchestrator, "connection_manager", None)
         if connection_manager is None:
-            self._gpu_quota_cache[HPCType.OLIVIA] = (now, None)
+            self._quota_cache[hpc_type] = (now, None)
             return None
 
-        account = str(getattr(HPC_CONFIGS.get(HPCType.OLIVIA), "account", "") or "").strip()
+        account = str(getattr(HPC_CONFIGS.get(hpc_type), "account", "") or "").strip()
         if not account:
-            self._gpu_quota_cache[HPCType.OLIVIA] = (now, None)
+            self._quota_cache[hpc_type] = (now, None)
             return None
 
-        cmd = f"sshare -P -h -A {account} -o Account,User,GrpTRESMins,GrpTRESRaw"
-        try:
-            stdout, stderr = connection_manager.run_command(HPCType.OLIVIA, cmd)
-        except Exception as exc:  # pragma: no cover - defensive path
-            logger.debug("Olivia quota probe failed: %s", exc)
-            self._gpu_quota_cache[HPCType.OLIVIA] = (now, None)
-            return None
-
-        if stderr and stderr.strip():
-            logger.debug("Olivia quota probe stderr: %s", stderr.strip())
-
-        parsed = self._parse_olivia_gpu_quota_snapshot(stdout, account)
-        self._gpu_quota_cache[HPCType.OLIVIA] = (now, parsed)
-        return parsed
+        snapshot = provider.fetch_snapshot(account=account, connection_manager=connection_manager)
+        self._quota_cache[hpc_type] = (now, snapshot)
+        return snapshot
 
     @staticmethod
     def _coerce_positive_int(value) -> int | None:
@@ -907,104 +824,137 @@ class TerminalDashboard:
 
         return requested_hours, requested_gpus
 
-    def _estimate_orchestration_worst_case_gpu_hours(self, exps: List[dict]) -> float | None:
-        """Estimate worst-case remaining orchestration cost in GPU-hours."""
-        worst_case_gpu_hours = 0.0
-        seen_unfinished = False
+    def _estimate_orchestration_worst_case_hours_per_cluster(self, exps: List[dict]) -> dict[HPCType, float]:
+        """Estimate worst-case remaining orchestration cost in GPU-hours by cluster."""
+        worst_case: dict[HPCType, float] = {}
+        seen_unfinished_hpcs: set[HPCType] = set()
         for exp in exps:
             status = exp.get("status")
             if status in self._DONE_STATES:
                 continue
-            seen_unfinished = True
+            hpc = exp.get("hpc_assignment")
+            if not isinstance(hpc, HPCType):
+                continue
+            seen_unfinished_hpcs.add(hpc)
             requested_hours, requested_gpus = self._resolve_effective_request_hours_and_gpus(exp)
             if requested_hours is None or requested_gpus is None:
                 continue
-            worst_case_gpu_hours += float(requested_hours * requested_gpus)
+            worst_case[hpc] = worst_case.get(hpc, 0.0) + float(requested_hours * requested_gpus)
 
-        if not seen_unfinished:
-            return 0.0
-        return worst_case_gpu_hours
-
-    @staticmethod
-    def _sigma2_allocation_period_bounds(today: date | None = None) -> tuple[date, date]:
-        """Return (start_date, end_date) for the Sigma2 allocation period."""
-        if today is None:
-            today = dt.now().date()
-        year = today.year
-        month = today.month
-        # Sigma2 allocation periods:
-        #   Apr 1 -> Sep 30
-        #   Oct 1 -> Mar 31 (next year)
-        if 4 <= month <= 9:
-            return (date(year, 4, 1), date(year, 9, 30))
-        if month >= 10:
-            return (date(year, 10, 1), date(year + 1, 3, 31))
-        return (date(year - 1, 10, 1), date(year, 3, 31))
+        for hpc in seen_unfinished_hpcs:
+            worst_case.setdefault(hpc, 0.0)
+        return worst_case
 
     @staticmethod
-    def _sigma2_allocation_period_end_date(today: date | None = None) -> date:
-        """Return Sigma2 allocation-period end date for `today`."""
-        _start, end = TerminalDashboard._sigma2_allocation_period_bounds(today)
-        return end
-
-    @staticmethod
-    def _sigma2_allocation_period_elapsed_pct(today: date | None = None) -> float:
-        """Return elapsed percentage for the current Sigma2 allocation period."""
-        if today is None:
-            today = dt.now().date()
-        start, end = TerminalDashboard._sigma2_allocation_period_bounds(today)
+    def _allocation_period_elapsed_pct(start: date, end: date, today: date) -> float:
+        """Return elapsed percentage for an allocation period."""
         total_days = max((end - start).days, 1)
         elapsed_days = max(min((today - start).days, total_days), 0)
         return (elapsed_days / float(total_days)) * 100.0
 
-    def _sigma2_period_footer_status(self) -> tuple[int, str, float]:
+    def _quota_period_footer_status(
+        self, provider: QuotaProvider, snapshot: QuotaSnapshot | None
+    ) -> tuple[int, str, float] | None:
+        """Return quota-period footer values when the provider exposes a period."""
         today = dt.now().date()
-        _period_start, period_end = self._sigma2_allocation_period_bounds(today)
-        elapsed_pct = self._sigma2_allocation_period_elapsed_pct(today)
+        if snapshot is not None and snapshot.period_start is not None and snapshot.period_end is not None:
+            period_start, period_end = snapshot.period_start, snapshot.period_end
+        else:
+            try:
+                period_bounds = provider.period_bounds(today=today)
+            except Exception as exc:  # pragma: no cover - defensive path
+                logger.debug("Quota provider period probe failed for %s: %s", provider.hpc_type, exc)
+                return None
+            if period_bounds is None:
+                return None
+            period_start, period_end = period_bounds
+        elapsed_pct = self._allocation_period_elapsed_pct(period_start, period_end, today)
         days_left = max((period_end - today).days, 0)
         return days_left, period_end.strftime('%d-%m-%y'), elapsed_pct
 
-    def _gpu_quota_label(self, exps: List[dict]) -> str | None:
-        """Footer label with remaining project GPU quota (Olivia-first)."""
-        if HPCType.OLIVIA not in self._active_hpcs(exps):
-            return None
-        days_left, period_end_txt, period_elapsed_pct = self._sigma2_period_footer_status()
-        period_segment = (
-            f"{self._quota_label_text('Period')}: {self._quota_number_text(f'{days_left}d')} left "
-            f"({self._quota_number_text(f'{period_elapsed_pct:.1f}%')} elapsed; "
-            f"ends {self._quota_number_text(period_end_txt)})"
-        )
-        snapshot = self._get_olivia_gpu_quota_snapshot(exps)
-        if snapshot is None:
-            return f"{self._quota_label_text('GPU quota')}: OLIVIA unavailable (missing `sshare` in runtime?) • {period_segment}"
-        remaining_hours = snapshot["remaining_minutes"] / 60.0
-        used_hours = snapshot["used_minutes"] / 60.0
-        limit_hours = snapshot["limit_minutes"] / 60.0
-        if limit_hours <= 0.0:
-            return f"{self._quota_label_text('GPU quota')}: OLIVIA unavailable (invalid quota limit) • {period_segment}"
-        used_pct = max(0.0, min((used_hours / limit_hours) * 100.0, 100.0))
-        pace_delta_pp = used_pct - period_elapsed_pct
-        worst_case_hours = self._estimate_orchestration_worst_case_gpu_hours(exps)
-        used_total_hours = f"{self._fmt_gpu_hours(used_hours)}/{self._fmt_gpu_hours(limit_hours)}h"
-        period_with_delta = (
+    def _quota_period_segment(self, period_status: tuple[int, str, float], pace_delta_pp: float | None = None) -> str:
+        """Render allocation-period footer segment."""
+        days_left, period_end_txt, period_elapsed_pct = period_status
+        if pace_delta_pp is None:
+            return (
+                f"{self._quota_label_text('Period')}: {self._quota_number_text(f'{days_left}d')} left "
+                f"({self._quota_number_text(f'{period_elapsed_pct:.1f}%')} elapsed; "
+                f"ends {self._quota_number_text(period_end_txt)})"
+            )
+        return (
             f"{self._quota_label_text('Period')}: {self._quota_number_text(f'{days_left}d')} left "
             f"({self._quota_number_text(f'{period_elapsed_pct:.1f}%')} elapsed, "
-            f"{self._quota_number_text(f'{pace_delta_pp:+.1f}pp')}; ends {self._quota_number_text(period_end_txt)})"
+            f"{self._quota_number_text(f'{pace_delta_pp:+.1f}pp')}; "
+            f"ends {self._quota_number_text(period_end_txt)})"
+        )
+
+    def _render_quota_line(
+        self,
+        *,
+        hpc_type: HPCType,
+        provider: QuotaProvider,
+        snapshot: QuotaSnapshot | None,
+        worst_case_hours: float | None,
+    ) -> str:
+        """Render one provider-backed quota footer line."""
+        period_status = self._quota_period_footer_status(provider, snapshot)
+        period_segment = self._quota_period_segment(period_status) if period_status is not None else None
+        provider_label = str(getattr(provider, "resource_label", "Quota"))
+        provider_cluster = getattr(provider, "cluster_name", hpc_type.value)
+        if snapshot is None:
+            hint = str(getattr(provider, "unavailable_hint", "quota probe unavailable"))
+            quota_line = f"{self._quota_label_text(provider_label)}: {provider_cluster} unavailable ({hint})"
+            return f"{quota_line} • {period_segment}" if period_segment else quota_line
+
+        if snapshot.limit <= 0.0:
+            quota_line = (
+                f"{self._quota_label_text(snapshot.resource_label)}: "
+                f"{snapshot.cluster_name} unavailable (invalid quota limit)"
+            )
+            return f"{quota_line} • {period_segment}" if period_segment else quota_line
+
+        pace_delta_pp = snapshot.used_pct - period_status[2] if period_status is not None else None
+        period_with_delta = (
+            self._quota_period_segment(period_status, pace_delta_pp=pace_delta_pp)
+            if period_status is not None
+            else None
+        )
+        used_total = (
+            f"{self._fmt_quota_amount(snapshot.used)}/" f"{self._fmt_quota_amount(snapshot.limit)}{snapshot.unit}"
         )
         quota_line = (
-            f"{self._quota_label_text('GPU quota')}: OLIVIA "
-            f"{self._quota_number_text(f'{self._fmt_gpu_hours(remaining_hours)}h')} left "
-            f"({self._quota_number_text(f'{used_pct:.1f}%')} used; {self._quota_number_text(used_total_hours)})"
+            f"{self._quota_label_text(snapshot.resource_label)}: {snapshot.cluster_name} "
+            f"{self._quota_number_text(f'{self._fmt_quota_amount(snapshot.remaining)}{snapshot.unit}')} left "
+            f"({self._quota_number_text(f'{snapshot.used_pct:.1f}%')} used; {self._quota_number_text(used_total)})"
         )
-        if worst_case_hours is None:
-            return f"{quota_line} • {period_with_delta}"
-        pct_left = (worst_case_hours / remaining_hours * 100.0) if remaining_hours > 0 else 0.0
-        quota_line += (
-            f" • {self._quota_label_text('Orch worst-case')}: "
-            f"{self._quota_number_text(f'{self._fmt_gpu_hours(worst_case_hours)}h')} "
-            f"({self._quota_number_text(f'{pct_left:.1f}%')} of left)"
-        )
-        return f"{quota_line} • {period_with_delta}"
+        if snapshot.worst_case_unit == "gpu_hours" and worst_case_hours is not None:
+            pct_left = (worst_case_hours / snapshot.remaining * 100.0) if snapshot.remaining > 0 else 0.0
+            quota_line += (
+                f" • {self._quota_label_text('Orch worst-case')}: "
+                f"{self._quota_number_text(f'{self._fmt_quota_amount(worst_case_hours)}{snapshot.unit}')} "
+                f"({self._quota_number_text(f'{pct_left:.1f}%')} of left)"
+            )
+        return f"{quota_line} • {period_with_delta}" if period_with_delta else quota_line
+
+    def _quota_label(self, exps: List[dict]) -> str | None:
+        """Footer label with remaining project quota for active clusters."""
+        active_hpcs = sorted(self._active_hpcs(exps), key=lambda hpc: hpc.value)
+        worst_case_by_hpc = self._estimate_orchestration_worst_case_hours_per_cluster(exps)
+        lines: list[str] = []
+        for hpc_type in active_hpcs:
+            provider = get_quota_provider(hpc_type)
+            if provider is None:
+                continue
+            snapshot = self._get_quota_snapshot(hpc_type)
+            lines.append(
+                self._render_quota_line(
+                    hpc_type=hpc_type,
+                    provider=provider,
+                    snapshot=snapshot,
+                    worst_case_hours=worst_case_by_hpc.get(hpc_type),
+                )
+            )
+        return "\n".join(lines) if lines else None
 
     def _infer_experiment_label(self) -> str | None:
         if self.orchestrator is None:
