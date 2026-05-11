@@ -4,7 +4,9 @@ Slurminator uses two related YAML formats:
 
 - **Experiment-state YAML** is the runnable file passed with `--yaml`. It has a
   top-level `experiments:` list and is updated by the orchestrator as jobs are
-  submitted, polled, retried, and completed.
+  submitted, polled, retried, and completed. It is also the durable run ledger:
+  Slurminator writes scheduler ids, output paths, resource requests, timestamps,
+  status, live metrics, and links back into the same file.
 - **Custom-sweep YAML** is the generator input passed with `--sweepfile`. It
   describes datasets, cases, seeds, and parameter sweeps. Slurminator expands it
   into an experiment-state YAML under `experiment_lists/`.
@@ -71,6 +73,12 @@ rewrite them while running:
 - `metrics`, `display_metric_info`, `links`, and progress fields populated from
   status callbacks.
 
+The `job_id` and `output_dir` fields are enough to recover the corresponding
+SLURM stdout/stderr files later (`slurm-<job_id>.out` and
+`slurm-<job_id>.err` under the recorded output directory). Status callbacks and
+external trackers such as W&B can add richer live metrics and links, but the
+experiment-state YAML remains the scheduling record Slurminator manages.
+
 Project-owned fields can also live on the row. The package treats unknown row
 fields as data for plugins, command builders, or downstream tools. Common
 generic fields are:
@@ -115,9 +123,16 @@ You may change concurrency flags when resuming. Be careful not to set the active
 cluster limit to zero for a YAML that still has live jobs on that cluster,
 because disabled assignments can be reset to `pending`.
 
-To intentionally rerun a finished experiment, copy the YAML or edit that row:
-set `status: pending` and remove stale scheduler fields such as `job_id`,
-timestamps, and output paths.
+While Slurminator is running, it reloads the experiment-state YAML each poll
+cycle. That means the file is an operational control surface as well as a record:
+if you set a finished or failed row back to `status: pending`, Slurminator will
+consider it available for relaunch when concurrency permits. For clean
+bookkeeping, also remove stale scheduler fields such as `job_id`, timestamps,
+and output paths; otherwise new submission metadata will overwrite the fields it
+owns as the row is relaunched.
+
+To intentionally rerun a finished experiment after Slurminator has stopped, make
+the same edit and restart with `--yaml <experiment-state.yaml>`.
 
 ## Custom-Sweep YAML
 

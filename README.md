@@ -19,21 +19,33 @@ Slurminator separates *experiment intent* from *cluster execution*.
    named cases, and override values.
 2. Slurminator expands that sweep into an experiment-state YAML: one row per job,
    with stable ids, resource metadata, status, and generated `sweep_params`.
+   This file then becomes the run ledger.
 3. For each pending row, Slurminator asks the command builder or project plugin
    to turn that row into a shell command.
 4. Slurminator submits that command through SLURM using the configured cluster,
    resource defaults, environment script, and concurrency limits.
 5. The training script applies any forwarded config overrides, runs the
    experiment, and can optionally write live status files through the callback.
-6. Slurminator polls scheduler state plus live status files, updates the
-   experiment-state YAML, and renders the dashboard. If the process stops, rerun
-   `--yaml <experiment-state.yaml>` to pick up where it left off.
+6. Slurminator polls scheduler state plus live status files, writes SLURM job
+   ids, output paths, resource requests, timestamps, metrics, and links back into
+   the experiment-state YAML, and renders the dashboard.
+
+The experiment-state YAML is therefore both the launch input and the persistent
+record of what happened. If the process stops, rerun
+`--yaml <experiment-state.yaml>` to pick up where it left off, assuming the
+recorded scheduler jobs, logs, and status files are still visible from the
+cluster filesystem. While Slurminator is running, it reloads the YAML each poll
+cycle; editing a completed or failed row back to `status: pending` makes it
+eligible for relaunch when concurrency is available.
 
 This is useful because paper sweeps become small, reviewable YAML artifacts
 instead of custom launch scripts. You can distribute or archive the sweep file,
-launch it with one Slurminator command, resume from the generated state file,
-and keep cluster-specific details in user config rather than in the experiment
-definition.
+launch it with one Slurminator command, resume or relaunch from the generated
+state file, recover SLURM logs through recorded job/output metadata, and keep
+cluster-specific details in user config rather than in the experiment
+definition. Tools such as W&B, MLflow, TensorBoard, or project-specific trackers
+remain complementary; Slurminator manages scheduling and run state while those
+tools manage richer experiment analytics.
 
 ## Status
 
