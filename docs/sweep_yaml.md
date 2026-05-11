@@ -172,6 +172,40 @@ Sweep override keys are otherwise opaque. Slurminator builds the override string
 and passes it to the configured command builder; your training code or project
 plugin decides what the keys mean.
 
+## Override Consumption Contract
+
+Custom-sweep generation is intentionally separate from project configuration
+loading. Slurminator expands `base_overrides`, `sweep_keys`, and `cases` into a
+row-level `sweep_params` string:
+
+```yaml
+experiments:
+  - experiment_id: optimizer_ablation_cifar10_adamw_lr0p001_s42
+    status: pending
+    task_type: train
+    dataset_name: cifar10
+    config: configs/cifar10.yaml
+    sweep_params: "optimizer.name=adamw;optimizer.lr=0.001;trainer.max_epochs=10"
+```
+
+Slurminator does not mutate your framework config object. One of the command
+paths must consume `sweep_params` and apply it inside your training program:
+
+- Explicit row commands can include the override flag themselves:
+  `extra_command: "python train.py --config configs/cifar10.yaml --overrides 'optimizer.lr=0.001'"`.
+- `SimpleCommandPlugin` can forward the generated string when configured with a
+  sweep-params argument, for example
+  `--simple-command-sweep-params-arg "--overrides"`.
+- A project plugin can implement `build_commands_line()` and append
+  `exp["sweep_params"]` to whatever CLI your project already uses.
+- A project-specific generator can instead write fully resolved config files and
+  put those file paths in `config`/`config_path`.
+
+If none of these paths exists, the sweep still submits jobs, but those jobs run
+the base config because no process consumed the generated overrides. Treat
+"training entrypoint accepts config overrides" as part of the project contract,
+not as something Slurminator can infer.
+
 ## Multiple Sweep Blocks
 
 One custom-sweep YAML can describe several separate experiment families:

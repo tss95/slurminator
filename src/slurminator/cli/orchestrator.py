@@ -115,6 +115,15 @@ def build_base_parser() -> argparse.ArgumentParser:
         default="--config",
         help="Config argument used by SimpleCommandPlugin. Use an empty string to disable.",
     )
+    parser.add_argument(
+        "--simple-command-sweep-params-arg",
+        type=str,
+        default=None,
+        help=(
+            "Optional argument used by SimpleCommandPlugin before a generated row's sweep_params value, "
+            "for example '--overrides' or '--sweep-params'."
+        ),
+    )
     return parser
 
 
@@ -384,7 +393,12 @@ def _default_plugin_from_args(args: argparse.Namespace) -> OrchestratorPlugin:
     entrypoint = getattr(args, "simple_command_entrypoint", None)
     if entrypoint:
         config_arg = getattr(args, "simple_command_config_arg", "--config")
-        return SimpleCommandPlugin(entrypoint=entrypoint, config_arg=config_arg or None)
+        sweep_params_arg = getattr(args, "simple_command_sweep_params_arg", None)
+        return SimpleCommandPlugin(
+            entrypoint=entrypoint,
+            config_arg=config_arg or None,
+            sweep_params_arg=sweep_params_arg or None,
+        )
     return DefaultOrchestratorPlugin()
 
 

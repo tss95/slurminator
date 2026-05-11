@@ -96,10 +96,12 @@ python -m slurminator \
   --yaml experiment_lists/small.yaml \
   --simple-command-entrypoint "python train.py" \
   --simple-command-config-arg "--config" \
+  --simple-command-sweep-params-arg "--overrides" \
   --olivia-limit 1
 ```
 
-With this mode, each experiment row should include `config` or `config_path`:
+With this mode, each experiment row should include `config` or `config_path`.
+Rows generated from a custom-sweep file may also include `sweep_params`:
 
 ```yaml
 experiments:
@@ -108,7 +110,18 @@ experiments:
     task_type: train
     dataset_name: smoke
     config: configs/smoke.yaml
+    sweep_params: "optimizer.lr=0.001;trainer.max_epochs=10"
 ```
+
+The resulting command is equivalent to:
+
+```bash
+python train.py --config configs/smoke.yaml --overrides 'optimizer.lr=0.001;trainer.max_epochs=10' --orchestrator
+```
+
+Slurminator only forwards the generated override string. Your training
+entrypoint must parse the argument named by
+`--simple-command-sweep-params-arg` and apply those overrides to its config.
 
 Flags:
 
@@ -117,9 +130,18 @@ Flags:
 - `--simple-command-config-arg ARG`: argument used before the row's `config` or
   `config_path`. Default: `--config`. Use an empty string when the entrypoint
   does not take a config argument.
+- `--simple-command-sweep-params-arg ARG`: optional argument used before the
+  row's `sweep_params`, such as `--overrides`, `--set`, or `--sweep-params`.
+  Leave unset when the row has no generated overrides or when the command reads
+  a fully resolved config file instead.
 
 Explicit row-level `extra_command` or `command` always wins over
 `SimpleCommandPlugin`.
+
+Projects with richer command rules should implement `build_commands_line()` in
+a plugin. The same contract applies there: if a generated row has
+`sweep_params`, the plugin must either forward it to the training CLI or replace
+it with an equivalent resolved config.
 
 ## Plugin Discovery
 
@@ -187,9 +209,11 @@ class MyPlugin(DefaultOrchestratorPlugin):
         config = exp.get("config") or exp.get("config_path")
         if not config:
             raise ValueError(f"{exp.get('experiment_id')} is missing config/config_path.")
+        sweep_params = exp.get("sweep_params")
+        sweep_args = f" --overrides {quote(str(sweep_params))}" if sweep_params else ""
         return (
             f"{self.train_entrypoint} --config {quote(str(config))} "
-            f"--project {quote(str(self.project_name))} --orchestrator"
+            f"--project {quote(str(self.project_name))}{sweep_args} --orchestrator"
         )
 ```
 

@@ -81,6 +81,7 @@ def test_cli_constructs_orchestrator_with_simple_command_plugin(tmp_path: Path) 
             "--simple-command-entrypoint",
             "python train.py",
             "--simple-command-config-arg=--config",
+            "--simple-command-sweep-params-arg=--overrides",
         ],
         launch_guard=lambda: None,
         load_configs=False,
@@ -91,6 +92,7 @@ def test_cli_constructs_orchestrator_with_simple_command_plugin(tmp_path: Path) 
     assert isinstance(captured["plugin"], SimpleCommandPlugin)
     assert captured["plugin"].entrypoint == "python train.py"
     assert captured["plugin"].config_arg == "--config"
+    assert captured["plugin"].sweep_params_arg == "--overrides"
     assert captured["ran"] is True
 
 
