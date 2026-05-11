@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+message: "If you use Slurminator, please cite the software and acknowledge the author affiliations."
+title: "Slurminator"
+type: software
+authors:
+  - family-names: Stangeland
+    given-names: Tord Sture
+    affiliation: "NORSAR (primary); University of Oslo (PhD affiliation)"
+repository-code: "https://github.com/tss95/slurminator"
+version: "0.1.0"
+date-released: "2026-05-11"

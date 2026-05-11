@@ -1,5 +1,8 @@
 # Slurminator
 
+**Author:** Tord Sture Stangeland
+**Affiliations:** NORSAR (primary); University of Oslo (PhD affiliation)
+
 Slurminator is a reusable SLURM/HPC experiment orchestrator extracted from PMT.
 It turns experiment YAML files into `sbatch` jobs, polls scheduler state, reads
 live status files, and renders a terminal dashboard for active sweeps.
