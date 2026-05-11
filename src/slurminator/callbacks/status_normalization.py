@@ -59,7 +59,7 @@ def normalize_status_payload(
 ) -> OrchestratorStatus:
     """Return a validated target-schema status object from generic inputs.
 
-    This function is intentionally PMT-agnostic: callers must decide what the
+    This function is intentionally project-agnostic: callers must decide what the
     epoch and step fields mean before invoking it.
     """
 

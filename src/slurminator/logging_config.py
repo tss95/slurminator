@@ -1,9 +1,8 @@
 """Logging helpers for Slurminator CLIs and adopters.
 
-This module copies the clickable-path logging pattern used by PMT, but keeps the
-defaults package-generic. PMT intentionally keeps its own logger module; this
-copy is for Slurminator's ``slurminator`` logger and external adopters that want
-the same console format.
+The module provides a package-generic clickable-path console logger for
+Slurminator's ``slurminator`` logger and for external adopters that want the
+same console format.
 """
 
 from __future__ import annotations

@@ -95,7 +95,7 @@ experiment_lists/
 
 The top-level `experiments_20260511_032235.yaml` file is the file you pass back
 to Slurminator with `--yaml`. It contains the run history and current scheduler
-state. A recent PMT canary with that name had four rows and recorded, for each
+state. A small canary run with that name had four rows and recorded, for each
 row:
 
 - the original intent: `experiment_id`, `task_type`, `dataset_name`,

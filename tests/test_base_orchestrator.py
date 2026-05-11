@@ -89,15 +89,15 @@ def test_custom_sweep_named_cases(make_orchestrator):
         CustomSweepConfig(
             datasets=["HAR"],
             num_epochs=120,
-            run_name_prefix="pma_memory",
-            experiment_prefix="pma_memory",
+            run_name_prefix="memory_variant",
+            experiment_prefix="memory_variant",
             cases=[
                 CustomSweepCase(
-                    name="pmt_memory", overrides={"model.pma.shared.experiment_mode": "pmt", "loss.lambda_pcl": 0.25}
+                    name="stateful", overrides={"model.core.experiment_mode": "stateful", "loss.lambda_aux": 0.25}
                 ),
                 CustomSweepCase(
-                    name="pmt_stateless",
-                    overrides={"model.pma.shared.experiment_mode": "pmt_stateless", "loss.lambda_pcl": 0.0},
+                    name="stateless",
+                    overrides={"model.core.experiment_mode": "stateless", "loss.lambda_aux": 0.0},
                 ),
             ],
         )
@@ -107,10 +107,10 @@ def test_custom_sweep_named_cases(make_orchestrator):
 
     experiments = orchestrator.experiments
     assert len(experiments) == 6
-    stateless = next(exp for exp in experiments if "pmt_stateless" in exp.experiment_id)
+    stateless = next(exp for exp in experiments if "stateless" in exp.experiment_id)
     params = dict(part.split("=", 1) for part in stateless.sweep_params.split(";"))
-    assert params["model.pma.shared.experiment_mode"] == "pmt_stateless"
-    assert float(params["loss.lambda_pcl"]) == 0.0
+    assert params["model.core.experiment_mode"] == "stateless"
+    assert float(params["loss.lambda_aux"]) == 0.0
     assert params["training_configs.num_epochs"] == "120"
 
 

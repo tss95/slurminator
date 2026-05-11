@@ -3,7 +3,8 @@
 **Author:** Tord Sture Stangeland
 **Affiliations:** NORSAR (primary); University of Oslo (PhD affiliation)
 
-Slurminator is a reusable SLURM/HPC experiment orchestrator extracted from PMT.
+Slurminator is a reusable SLURM/HPC experiment orchestrator extracted from a
+research workflow.
 It turns experiment YAML files into `sbatch` jobs, polls scheduler state, reads
 live status files, and renders a terminal dashboard for active sweeps.
 
@@ -40,7 +41,7 @@ visible from the cluster filesystem. While Slurminator is running, it reloads
 the YAML each poll cycle; editing a completed or failed row back to
 `status: pending` makes it eligible for relaunch when concurrency is available.
 
-This is useful because paper sweeps become small, reviewable YAML artifacts
+This is useful because large sweeps become small, reviewable YAML artifacts
 instead of custom launch scripts. You can distribute or archive the sweep file,
 launch it with one Slurminator command, resume or relaunch from the generated
 state file, recover SLURM logs through recorded job/output metadata, and keep
@@ -51,9 +52,8 @@ tools manage richer experiment analytics.
 
 ## Status
 
-This repository is early but functional. PMT is currently the reference adopter,
-and the package is still stabilizing around that extraction. The public API may
-change before a tagged `0.1.0` release.
+This repository is early but functional. The public API may change before a
+tagged `0.1.0` release.
 
 ## License
 
@@ -298,8 +298,8 @@ Cluster jobs source the `environment_setup` script from `hpc_config.yaml`
 before running the experiment command. Use this script to load modules,
 activate containers, set cache paths, and configure tracker credentials.
 
-The default PMT convention is `step_0.sh`, but adopters can use any project-local
-script name.
+The examples use `step_0.sh`, but adopters can use any project-local script
+name.
 
 ## Logging
 
