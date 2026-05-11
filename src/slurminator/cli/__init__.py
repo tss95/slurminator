@@ -29,6 +29,13 @@ def build_concurrency_limits(args: Any) -> Any:
     return _build_concurrency_limits(args)
 
 
+def discover_plugin(*args: Any, **kwargs: Any) -> Any:
+    """Load the plugin declared by ``SLURMINATOR_PLUGIN``, if configured."""
+    from slurminator.cli.orchestrator import discover_plugin as _discover_plugin
+
+    return _discover_plugin(*args, **kwargs)
+
+
 def generate_experiment_yaml_from_flags(args: Any, **kwargs: Any) -> str:
     """Generate an experiment YAML from generic custom-sweep CLI flags."""
     from slurminator.cli.orchestrator import generate_experiment_yaml_from_flags as _generate
@@ -53,6 +60,7 @@ def run_orchestrator_cli(*args: Any, **kwargs: Any) -> None:
 __all__ = [
     "build_base_parser",
     "build_concurrency_limits",
+    "discover_plugin",
     "generate_experiment_yaml_from_flags",
     "main",
     "parse_override_list",

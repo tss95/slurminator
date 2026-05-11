@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import logging
+import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -27,6 +28,7 @@ ExperimentGenerator = Callable[[argparse.Namespace], str]
 PluginFactory = Callable[[argparse.Namespace], OrchestratorPlugin]
 SweepModeRunner = Callable[[argparse.Namespace, Any | None], None]
 LaunchGuard = Callable[[], str | None]
+PLUGIN_ENV_VAR = "SLURMINATOR_PLUGIN"
 
 
 def build_base_parser() -> argparse.ArgumentParser:
@@ -136,11 +138,22 @@ def run_orchestrator_cli(
     connection_manager_cls: type[HPCConnectionManager] = HPCConnectionManager,
 ) -> None:
     """Run orchestration from CLI arguments with optional project hooks."""
+    discovered_plugin = None if plugin_factory is not None else discover_plugin()
+    raw_argv = list(argv) if argv is not None else None
+    if discovered_plugin is not None:
+        raw_argv = _call_optional_hook(
+            discovered_plugin, "pre_parse_argv", raw_argv if raw_argv is not None else sys.argv[1:]
+        )
+
     parser = build_base_parser()
+    if parser_extender is None and discovered_plugin is not None:
+        parser_extender = _get_optional_hook(discovered_plugin, "extend_parser")
     if parser_extender is not None:
         parser = parser_extender(parser)
-    args = parser.parse_args(list(argv) if argv is not None else None)
+    args = parser.parse_args(raw_argv)
 
+    if args_preparer is None and discovered_plugin is not None:
+        args_preparer = _get_optional_hook(discovered_plugin, "prepare_args")
     if args_preparer is not None:
         args_preparer(args)
     else:
@@ -153,11 +166,20 @@ def run_orchestrator_cli(
             repo_root=args.repo_root,
         )
 
+    if launch_guard is get_orchestrator_gpu_hpc_launch_block_message and discovered_plugin is not None:
+        launch_guard = _get_optional_hook(discovered_plugin, "launch_guard") or launch_guard
     if launch_guard is not None:
         block_msg = launch_guard()
         if block_msg:
             logger.error(block_msg)
             raise SystemExit(2)
+
+    if connection_manager_cls is HPCConnectionManager and discovered_plugin is not None:
+        connection_manager_cls = _get_optional_class(
+            discovered_plugin, "connection_manager_cls", connection_manager_cls
+        )
+    if orchestrator_cls is HPCOrchestrator and discovered_plugin is not None:
+        orchestrator_cls = _get_optional_class(discovered_plugin, "orchestrator_cls", orchestrator_cls)
 
     concurrency_limits = build_concurrency_limits(args)
     early_connection_manager = _bootstrap_connection_manager(
@@ -165,11 +187,15 @@ def run_orchestrator_cli(
     )
 
     if getattr(args, "wandb_sweep", None) is not None:
+        if sweep_mode_runner is None and discovered_plugin is not None:
+            sweep_mode_runner = _get_optional_hook(discovered_plugin, "run_sweep_mode")
         if sweep_mode_runner is None:
             raise SystemExit("--wandb-sweep was provided, but no sweep-mode runner is configured.")
         sweep_mode_runner(args, early_connection_manager)
         return
 
+    if experiment_generator is None and discovered_plugin is not None:
+        experiment_generator = _get_optional_hook(discovered_plugin, "generate_experiment_yaml")
     experiment_file = _resolve_experiment_file(args, experiment_generator=experiment_generator)
     if not Path(experiment_file).exists():
         raise SystemExit(f"Experiment file not found: {experiment_file}")
@@ -178,7 +204,12 @@ def run_orchestrator_cli(
         logger.info("Dry run enabled - not launching HPC orchestrator.")
         return
 
-    plugin = plugin_factory(args) if plugin_factory is not None else _default_plugin_from_args(args)
+    if plugin_factory is not None:
+        plugin = plugin_factory(args)
+    elif discovered_plugin is not None:
+        plugin = _configured_plugin_from_args(discovered_plugin, args)
+    else:
+        plugin = _default_plugin_from_args(args)
     partition_overrides = parse_partition_overrides(args)
     orchestrator = orchestrator_cls(
         experiment_file=str(experiment_file),
@@ -199,9 +230,71 @@ def run_orchestrator_cli(
     orchestrator.run()
 
 
+def discover_plugin(env: Mapping[str, str] | None = None) -> Any | None:
+    """Load the plugin declared by ``SLURMINATOR_PLUGIN``, if any."""
+    env_map = os.environ if env is None else env
+    dotted_path = env_map.get(PLUGIN_ENV_VAR, "").strip()
+    if not dotted_path:
+        return None
+
+    try:
+        plugin_obj = load_object(dotted_path)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not import Slurminator plugin from {PLUGIN_ENV_VAR}={dotted_path!r}. "
+            "Use 'module:ClassName' or 'module.ClassName', ensure the module is importable, "
+            "or unset SLURMINATOR_PLUGIN to use the default generic plugin."
+        ) from exc
+
+    plugin = plugin_obj() if isinstance(plugin_obj, type) else plugin_obj
+    if not hasattr(plugin, "build_commands_line"):
+        raise TypeError(
+            f"Object loaded from {PLUGIN_ENV_VAR}={dotted_path!r} is not an orchestrator plugin. "
+            "It must provide at least build_commands_line(exp, context), or unset SLURMINATOR_PLUGIN."
+        )
+    return plugin
+
+
 def build_concurrency_limits(args: argparse.Namespace) -> dict[HPCType, int]:
     """Return per-cluster concurrency limits from parsed CLI arguments."""
     return {hpc_type: int(getattr(args, f"{hpc_type.name.lower()}_limit", 0) or 0) for hpc_type in HPCType}
+
+
+def _get_optional_hook(plugin: Any, hook_name: str) -> Callable[..., Any] | None:
+    """Return an optional callable plugin hook."""
+    hook = getattr(plugin, hook_name, None)
+    return hook if callable(hook) else None
+
+
+def _call_optional_hook(plugin: Any, hook_name: str, default: Any) -> Any:
+    """Call an optional plugin hook and return ``default`` when absent."""
+    hook = _get_optional_hook(plugin, hook_name)
+    if hook is None:
+        return default
+    result = hook(default)
+    return default if result is None else result
+
+
+def _get_optional_class(plugin: Any, hook_name: str, default: type[Any]) -> type[Any]:
+    """Return a class override from a plugin attribute/property/method."""
+    value = getattr(plugin, hook_name, None)
+    if value is None:
+        return default
+    if isinstance(value, type):
+        return value
+    if callable(value):
+        resolved = value()
+        return resolved if isinstance(resolved, type) else default
+    return default
+
+
+def _configured_plugin_from_args(plugin: Any, args: argparse.Namespace) -> OrchestratorPlugin:
+    """Return a discovered plugin configured with parsed CLI args when supported."""
+    hook = _get_optional_hook(plugin, "configure_from_args")
+    if hook is None:
+        return plugin
+    configured = hook(args)
+    return plugin if configured is None else configured
 
 
 def parse_partition_overrides(args: argparse.Namespace) -> dict[HPCType, str]:
