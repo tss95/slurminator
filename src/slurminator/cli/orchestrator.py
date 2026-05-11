@@ -18,6 +18,7 @@ from slurminator.experiments import CustomSweepConfig, MasterExperimentConfig
 from slurminator.experiments.yaml_utils import load_yaml
 from slurminator.hpc_orchestrator import HPCOrchestrator
 from slurminator.launch_guard import get_orchestrator_gpu_hpc_launch_block_message
+from slurminator.logging_config import configure_logging
 from slurminator.plugins import DefaultOrchestratorPlugin, OrchestratorPlugin, SimpleCommandPlugin
 
 logger = logging.getLogger("slurminator")
@@ -129,6 +130,7 @@ def build_base_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> None:
     """Console-script entry point for the generic Slurminator CLI."""
+    configure_logging(Path.cwd())
     run_orchestrator_cli(argv=argv)
 
 

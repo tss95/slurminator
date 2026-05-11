@@ -297,6 +297,24 @@ activate containers, set cache paths, and configure tracker credentials.
 The default PMT convention is `step_0.sh`, but adopters can use any project-local
 script name.
 
+## Logging
+
+The Slurminator CLI configures a clickable-path console logger for the
+`slurminator` logger. The format is copied from PMT's logging style but kept as
+a separate package implementation, so PMT can retain its own `PMT` logger.
+
+Set `SLURMINATOR_LOG_LEVEL=DEBUG` (or `INFO`, `WARNING`, `ERROR`) to control
+Slurminator verbosity. If that variable is unset, `LOG_LEVEL` is used as a
+fallback before defaulting to `INFO`.
+
+Adopters can reuse the logger setup directly:
+
+```python
+from slurminator.logging_config import configure_logging
+
+configure_logging(project_root=".")
+```
+
 ## Status Files
 
 Jobs can write live status files using Slurminator's callback helpers under:
