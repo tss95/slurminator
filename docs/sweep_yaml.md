@@ -79,6 +79,38 @@ SLURM stdout/stderr files later (`slurm-<job_id>.out` and
 external trackers such as W&B can add richer live metrics and links, but the
 experiment-state YAML remains the scheduling record Slurminator manages.
 
+### Generated Run Ledger Example
+
+A generated run typically has this shape:
+
+```text
+experiment_lists/
+  experiments_20260511_032235.yaml
+  outputs/
+    experiments_20260511_032235/
+      <experiment_id>/
+        slurm-<job_id>.out
+        slurm-<job_id>.err
+```
+
+The top-level `experiments_20260511_032235.yaml` file is the file you pass back
+to Slurminator with `--yaml`. It contains the run history and current scheduler
+state. A recent PMT canary with that name had four rows and recorded, for each
+row:
+
+- the original intent: `experiment_id`, `task_type`, `dataset_name`,
+  `sweep_params`, and project metadata such as run name and seed;
+- Slurminator state: `status`, `hpc_assignment`, `job_id`, output directory,
+  requested time/RAM/GPU count, and lifecycle timestamps;
+- live/tracker state: W&B run id/URL, step and epoch counters, metrics, and
+  display metadata when the status callback had emitted them.
+
+If a run is cancelled or the orchestrator process exits before a final scheduler
+poll, the YAML may show the last known state rather than the final terminal
+state. Relaunching with `--yaml experiment_lists/experiments_20260511_032235.yaml`
+lets Slurminator refresh rows from scheduler state and the recorded log/status
+locations, as long as those artifacts are still visible.
+
 Project-owned fields can also live on the row. The package treats unknown row
 fields as data for plugins, command builders, or downstream tools. Common
 generic fields are:
@@ -96,8 +128,8 @@ generic fields are:
 ## Resuming With `--yaml`
 
 `--yaml` is the pick-up-where-you-left-off path. If the orchestrator exits while
-jobs are still queued or running, launch it again with the same experiment-state
-YAML:
+jobs are still queued or running, launch it again with the generated
+`experiment_lists/experiments_*.yaml` file:
 
 ```bash
 python -m slurminator \
@@ -117,7 +149,8 @@ continues from the recorded row state:
   resets it to `pending` so it can be submitted again.
 
 Do not resume by re-running `--sweepfile`; that creates a new experiment-state
-file. Resume with the generated `experiment_lists/<name>.yaml` file instead.
+file. Resume with the generated `experiment_lists/experiments_*.yaml` file
+instead.
 
 You may change concurrency flags when resuming. Be careful not to set the active
 cluster limit to zero for a YAML that still has live jobs on that cluster,
@@ -132,7 +165,8 @@ and output paths; otherwise new submission metadata will overwrite the fields it
 owns as the row is relaunched.
 
 To intentionally rerun a finished experiment after Slurminator has stopped, make
-the same edit and restart with `--yaml <experiment-state.yaml>`.
+the same edit and restart with the generated file:
+`--yaml experiment_lists/experiments_*.yaml`.
 
 ## Custom-Sweep YAML
 
@@ -462,7 +496,7 @@ progress.
 4. Launch the generated list, either directly from the first command or by
    passing the generated file with `--yaml`.
 5. If the orchestrator stops or your session disconnects, resume with `--yaml`
-   and the same generated experiment-state file.
+   and the same generated `experiment_lists/experiments_*.yaml` file.
 
 For live metric collection and dashboard metric-key configuration, see
 [`docs/status_callback.md`](status_callback.md).

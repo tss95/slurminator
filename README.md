@@ -11,7 +11,7 @@ The package owns generic orchestration: config loading, SSH/SLURM submission,
 status ingestion, timeout handling, dashboard rendering, and quota display.
 Project-specific behavior enters through a small plugin interface.
 
-## Mental Model
+## High-Level Description
 
 Slurminator separates *experiment intent* from *cluster execution*.
 
@@ -30,13 +30,15 @@ Slurminator separates *experiment intent* from *cluster execution*.
    ids, output paths, resource requests, timestamps, metrics, and links back into
    the experiment-state YAML, and renders the dashboard.
 
-The experiment-state YAML is therefore both the launch input and the persistent
-record of what happened. If the process stops, rerun
-`--yaml <experiment-state.yaml>` to pick up where it left off, assuming the
-recorded scheduler jobs, logs, and status files are still visible from the
-cluster filesystem. While Slurminator is running, it reloads the YAML each poll
-cycle; editing a completed or failed row back to `status: pending` makes it
-eligible for relaunch when concurrency is available.
+The generated file, usually named like
+`experiment_lists/experiments_YYYYMMDD_HHMMSS.yaml`, is therefore both the
+launch input and the persistent record of what happened. If the process stops,
+launch Slurminator again with
+`--yaml experiment_lists/experiments_YYYYMMDD_HHMMSS.yaml` to pick up where it
+left off, assuming the recorded scheduler jobs, logs, and status files are still
+visible from the cluster filesystem. While Slurminator is running, it reloads
+the YAML each poll cycle; editing a completed or failed row back to
+`status: pending` makes it eligible for relaunch when concurrency is available.
 
 This is useful because paper sweeps become small, reviewable YAML artifacts
 instead of custom launch scripts. You can distribute or archive the sweep file,
@@ -201,8 +203,9 @@ python -m slurminator \
   --n-gpus 1
 ```
 
-`--yaml` is also the resume path. Re-run it against the same experiment-state
-YAML to reconnect to queued/running jobs and continue submitting pending rows.
+`--yaml` is also the resume path. Launch Slurminator with the same generated
+`experiment_lists/experiments_*.yaml` file to reconnect to queued/running jobs
+and continue submitting pending rows.
 
 Generate an experiment list from a custom sweep file:
 
