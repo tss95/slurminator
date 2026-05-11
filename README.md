@@ -286,7 +286,7 @@ users do not need to repeat them on every launch.
 ## Project Plugins
 
 Projects can customize parser flags, command construction, validation, tracker
-integration, log interpretation, and class selection through a plugin:
+integration, log interpretation, and runtime presentation through a plugin:
 
 ```bash
 export SLURMINATOR_PLUGIN="my_project.orchestrator:MyOrchestratorPlugin"
@@ -304,6 +304,14 @@ Runtime plugin methods:
 - `interpret_log_tail(exp, log_tail, current_status, stage)`
 - `annotate_log_tail(exp, log_tail)`
 
+Optional runtime integration hooks:
+
+- `status_projection_options()`
+- `parse_sweep_overrides(raw)`
+- `is_local_hpc(hpc_type)`
+- `dashboard_class()`
+- `overview_printer()`
+
 Optional CLI integration hooks:
 
 - `pre_parse_argv(argv)`
@@ -313,12 +321,19 @@ Optional CLI integration hooks:
 - `generate_experiment_yaml(args)`
 - `run_sweep_mode(args, connection_manager)`
 - `launch_guard()`
-- `orchestrator_cls`
-- `connection_manager_cls`
 
 Most adopters do not need all hooks. Start with explicit `extra_command` rows or
 `SimpleCommandPlugin`, then add a project plugin only when the command line or
 tracker behavior cannot be expressed as data.
+
+Projects that already use local environment-variable prefixes can set
+`SLURMINATOR_ENV_PREFIXES`, for example:
+
+```bash
+export SLURMINATOR_ENV_PREFIXES="MYPROJECT,SLURMINATOR"
+```
+
+Slurminator always keeps `SLURMINATOR` as a fallback prefix.
 
 ## Environment Script
 

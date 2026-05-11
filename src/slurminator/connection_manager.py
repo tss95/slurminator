@@ -42,14 +42,35 @@ from slurminator.config import HPC_CONFIGS, HPCType, is_current_hpc
 
 logger = logging.getLogger("slurminator")
 
-# Compatibility wrappers may prepend project-specific prefixes.
+# Compatibility wrappers may prepend project-specific prefixes. Users can also
+# set SLURMINATOR_ENV_PREFIXES=PROJECT,SLURMINATOR to opt into project-local
+# environment-variable names without wrapping this module.
 ENV_PREFIXES: tuple[str, ...] = ("SLURMINATOR",)
+
+
+def _env_prefixes() -> tuple[str, ...]:
+    """Return environment-variable prefixes in lookup order."""
+    raw = os.getenv("SLURMINATOR_ENV_PREFIXES", "")
+    if not raw.strip():
+        return ENV_PREFIXES
+
+    prefixes: list[str] = []
+    for item in raw.split(","):
+        prefix = item.strip().upper()
+        if prefix and prefix not in prefixes:
+            prefixes.append(prefix)
+
+    for prefix in ENV_PREFIXES:
+        if prefix not in prefixes:
+            prefixes.append(prefix)
+
+    return tuple(prefixes) or ENV_PREFIXES
 
 
 def _env(name: str, default: str | None = None, *, hpc_name: str | None = None) -> str | None:
     """Return the first matching prefixed environment variable."""
     suffix = f"{name}_{hpc_name}" if hpc_name else name
-    for prefix in ENV_PREFIXES:
+    for prefix in _env_prefixes():
         value = os.getenv(f"{prefix}_{suffix}")
         if value is not None:
             return value
@@ -1084,7 +1105,7 @@ class HPCConnectionManager:
                                     f"(missing: {', '.join(missing_slurm)}). "
                                     f"Refusing self-SSH to '{sub_host}' by default. "
                                     "Fix local Slurm availability in this environment or set "
-                                    f"{ENV_PREFIXES[0]}_ALLOW_SELF_SSH_LOCAL=1 to explicitly allow self-SSH."
+                                    f"{_env_prefixes()[0]}_ALLOW_SELF_SSH_LOCAL=1 to explicitly allow self-SSH."
                                 )
                     else:
                         use_submission = True
@@ -1387,6 +1408,7 @@ def main():
 __all__ = [
     "BadAuthenticationType",
     "ENV_PREFIXES",
+    "_env_prefixes",
     "HPCConnectionConfig",
     "HPCConnectionManager",
     "UserCancelledError",

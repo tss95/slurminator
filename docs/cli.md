@@ -204,9 +204,6 @@ A plugin may implement any of these optional CLI hooks:
   `None` to continue.
 - `configure_from_args(args) -> OrchestratorPlugin | None`: configure and return
   the runtime plugin after parsing.
-- `orchestrator_cls`: class or method returning an `HPCOrchestrator` subclass.
-- `connection_manager_cls`: class or method returning an `HPCConnectionManager`
-  subclass.
 
 Example:
 
@@ -252,6 +249,27 @@ The core runtime plugin surface is intentionally small:
 - `interpret_log_tail(exp=..., log_tail=..., current_status=..., stage=...)`
 - `annotate_log_tail(exp=..., log_tail=...) -> None`
 
+Projects that need runtime integration without subclassing the orchestrator can
+also implement optional hooks:
+
+- `status_projection_options() -> dict`: customize how status files project into
+  experiment rows.
+- `parse_sweep_overrides(raw) -> dict`: parse project-specific sweep override
+  strings for validation.
+- `is_local_hpc(hpc_type) -> bool`: override current-cluster detection.
+- `dashboard_class() -> type | None`: provide a project dashboard subclass.
+- `overview_printer() -> callable | None`: provide text/debug rendering.
+
 Most adopters start with explicit `extra_command` rows or
 `SimpleCommandPlugin`. Add a custom plugin only when the command line, validation
 rules, tracker integration, or log interpretation cannot be expressed as data.
+
+Connection-manager environment variables normally use the `SLURMINATOR_` prefix.
+If a project already has a private prefix, set `SLURMINATOR_ENV_PREFIXES` before
+launching:
+
+```bash
+export SLURMINATOR_ENV_PREFIXES="MYPROJECT,SLURMINATOR"
+```
+
+The `SLURMINATOR` prefix is kept as a fallback even if omitted.

@@ -44,6 +44,20 @@ IsLocalHPC = Callable[[HPCType], bool]
 OverviewPrinter = Callable[[list[dict[str, Any]]], None]
 
 
+def _call_plugin_noarg_hook(plugin: Any, hook_name: str) -> Any | None:
+    """Call an optional no-argument plugin hook or return an attribute value."""
+    value = getattr(plugin, hook_name, None)
+    if value is None:
+        return None
+    return value() if callable(value) else value
+
+
+def _get_plugin_callable(plugin: Any, hook_name: str, default: Callable[..., Any]) -> Callable[..., Any]:
+    """Return an optional callable plugin hook or ``default``."""
+    value = getattr(plugin, hook_name, None)
+    return value if callable(value) else default
+
+
 class HPCOrchestrator:
     """
     HPCOrchestrator that:
@@ -76,8 +90,8 @@ class HPCOrchestrator:
         runtime_options: Optional[Mapping[str, Any]] = None,
         partition_overrides: Optional[Mapping[HPCType, str | None]] = None,
         projection_options: Optional[Mapping[str, Any]] = None,
-        parse_overrides: Callable[[list[str] | str], dict[str, Any]] = parse_override_list,
-        is_local_hpc_fn: IsLocalHPC = is_current_hpc,
+        parse_overrides: Optional[Callable[[list[str] | str], dict[str, Any]]] = None,
+        is_local_hpc_fn: Optional[IsLocalHPC] = None,
         dashboard_cls: Optional[Type[Any]] = None,
         overview_printer: Optional[OverviewPrinter] = None,
     ):
@@ -119,11 +133,16 @@ class HPCOrchestrator:
             for hpc_type, partition in dict(partition_overrides or {}).items()
             if partition is not None and str(partition).strip()
         }
-        self.projection_options = dict(projection_options or {})
-        self.parse_overrides = parse_overrides
-        self.is_local_hpc_fn = is_local_hpc_fn
-        self.dashboard_cls = dashboard_cls
-        self.overview_printer = overview_printer
+        plugin_projection_options = _call_plugin_noarg_hook(self.plugin, "status_projection_options")
+        self.projection_options = dict(
+            projection_options if projection_options is not None else plugin_projection_options or {}
+        )
+        self.parse_overrides = parse_overrides or _get_plugin_callable(
+            self.plugin, "parse_sweep_overrides", parse_override_list
+        )
+        self.is_local_hpc_fn = is_local_hpc_fn or _get_plugin_callable(self.plugin, "is_local_hpc", is_current_hpc)
+        self.dashboard_cls = dashboard_cls or _call_plugin_noarg_hook(self.plugin, "dashboard_class")
+        self.overview_printer = overview_printer or _call_plugin_noarg_hook(self.plugin, "overview_printer")
 
         # Build or reuse HPC connections
         if connection_manager is not None:

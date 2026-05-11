@@ -24,6 +24,8 @@ from slurminator.connection_manager import (
     HPCConnectionConfig,
     HPCConnectionManager,
     HPCType,
+    _env,
+    _env_prefixes,
     _safe_getpass,
     _safe_input,
     UserCancelledError,
@@ -34,6 +36,23 @@ from slurminator.connection_manager import (
 def minimal_manager():
     cfg = HPCConnectionConfig(hostname="local", username="user")
     return HPCConnectionManager({HPCType.FOX: cfg})
+
+
+def test_env_prefixes_can_be_extended_from_environment(monkeypatch):
+    monkeypatch.setenv("SLURMINATOR_ENV_PREFIXES", "PMT,SLURMINATOR")
+    monkeypatch.setenv("PMT_SSH_CONNECT_TIMEOUT_FOX", "44")
+    monkeypatch.setenv("SLURMINATOR_SSH_CONNECT_TIMEOUT_FOX", "55")
+
+    assert _env_prefixes() == ("PMT", "SLURMINATOR")
+    assert _env("SSH_CONNECT_TIMEOUT", hpc_name="FOX") == "44"
+
+
+def test_env_prefixes_keep_slurminator_fallback(monkeypatch):
+    monkeypatch.setenv("SLURMINATOR_ENV_PREFIXES", "PMT")
+    monkeypatch.setenv("SLURMINATOR_SSH_CONNECT_TIMEOUT_FOX", "55")
+
+    assert _env_prefixes() == ("PMT", "SLURMINATOR")
+    assert _env("SSH_CONNECT_TIMEOUT", hpc_name="FOX") == "55"
 
 
 def test_is_local_hpc_detects(monkeypatch, minimal_manager):
