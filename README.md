@@ -238,8 +238,8 @@ training loop, or subclass it for project-specific display metrics and tracker
 links.
 
 See [docs/status_callback.md](docs/status_callback.md) for a complete callback
-integration example, including primary/secondary tracking metric keys and
-display metadata.
+integration example, including full display metric sets, primary/secondary
+highlight metrics, and display metadata.
 
 Minimal framework-neutral pattern:
 

@@ -96,6 +96,11 @@ Status files contain two related metric sections:
 - `display`: dashboard hints, including `primary_metric`, `secondary_metric`,
   and `metric_info`.
 
+`primary_metric` and `secondary_metric` are not a two-metric limit. They are
+highlight references used for sorting, quick summaries, and compact views. The
+full display metric set is declared by `metric_info`, and all numeric values are
+kept in `metrics`.
+
 Metric values must be JSON numbers. Booleans, strings, nested dictionaries,
 lists, NaN, and infinity are ignored or rejected.
 
@@ -125,6 +130,139 @@ usually has no primary metric column yet. Once `val/accuracy` appears in
 
 Use stable metric keys. Renaming a metric halfway through a run creates a new
 dashboard column instead of updating the old one.
+
+## Showing More Than Two Metrics
+
+Declare every metric you want the main dashboard table to consider in
+`metric_info`:
+
+```python
+status_cb = OrchestratorStatusCallback(
+    cfg=cfg,
+    primary_metric="val/accuracy",
+    secondary_metric="val/loss",
+    metric_info={
+        "val/accuracy": MetricDisplayCandidate(
+            shortform="acc",
+            higher_better=True,
+            format=".2%",
+            threshold=0.90,
+        ),
+        "val/loss": MetricDisplayCandidate(
+            shortform="loss",
+            higher_better=False,
+            format=".4f",
+        ),
+        "val/f1": MetricDisplayCandidate(
+            shortform="f1",
+            higher_better=True,
+            format=".3f",
+        ),
+        "val/auroc": MetricDisplayCandidate(
+            shortform="auc",
+            higher_better=True,
+            format=".3f",
+            threshold=0.95,
+        ),
+    },
+)
+```
+
+Then emit those metric keys through `on_epoch_end()` or `update_metrics()`:
+
+```python
+status_cb.on_epoch_end(
+    trainer,
+    epoch,
+    train_logs={"loss": train_loss},
+    val_logs={
+        "accuracy": val_accuracy,
+        "loss": val_loss,
+        "f1": val_f1,
+        "auroc": val_auroc,
+    },
+)
+```
+
+The main v3 dashboard table discovers metric columns from:
+
+1. `primary_metric`,
+2. `secondary_metric`,
+3. every key in `metric_info`.
+
+Columns with no value across the visible rows are dropped to keep the table
+compact. Compact summary tables may still show only primary and secondary
+metrics; the full metric set is preserved in `metrics` and rendered in the main
+table when values exist.
+
+Metrics that are emitted but not listed in `metric_info` are still preserved in
+the status file and experiment-state YAML. They are not promoted to named
+dashboard columns unless you declare display metadata for them.
+
+## Project-Specific Metric Selection
+
+Use constructor arguments when every run uses the same metric keys. Subclass the
+callback when metric selection depends on task type, dataset, model family, or a
+project config object.
+
+Override `_resolve_display_candidates()` to set the display metric policy:
+
+```python
+from slurminator.callbacks.status_callback import OrchestratorStatusCallback
+from slurminator.callbacks.status_normalization import MetricDisplayCandidate
+
+
+class ProjectStatusCallback(OrchestratorStatusCallback):
+    def _resolve_display_candidates(self, trainer) -> None:
+        super()._resolve_display_candidates(trainer)
+
+        task_type = getattr(self.cfg, "task_type", "classification")
+
+        if task_type == "classification":
+            self._primary_metric = "val/accuracy"
+            self._secondary_metric = "val/loss"
+            self._metric_info.update(
+                {
+                    "val/accuracy": MetricDisplayCandidate(
+                        shortform="acc",
+                        higher_better=True,
+                        format=".2%",
+                    ),
+                    "val/loss": MetricDisplayCandidate(
+                        shortform="loss",
+                        higher_better=False,
+                        format=".4f",
+                    ),
+                    "val/f1": MetricDisplayCandidate(
+                        shortform="f1",
+                        higher_better=True,
+                        format=".3f",
+                    ),
+                }
+            )
+        elif task_type == "forecasting":
+            self._primary_metric = "val/mae"
+            self._secondary_metric = "val/mse"
+            self._metric_info.update(
+                {
+                    "val/mae": MetricDisplayCandidate(
+                        shortform="mae",
+                        higher_better=False,
+                        format=".4f",
+                    ),
+                    "val/mse": MetricDisplayCandidate(
+                        shortform="mse",
+                        higher_better=False,
+                        format=".4f",
+                    ),
+                }
+            )
+```
+
+The same strict materialization rule applies: declaring a metric candidate does
+not write it into `display.metric_info` until the numeric metric appears in
+`metrics`. This lets you declare the expected display set at train start without
+creating orphan display entries.
 
 ## Late Or External Metrics
 
