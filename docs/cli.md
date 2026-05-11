@@ -122,6 +122,8 @@ python train.py --config configs/smoke.yaml --overrides 'optimizer.lr=0.001;trai
 Slurminator only forwards the generated override string. Your training
 entrypoint must parse the argument named by
 `--simple-command-sweep-params-arg` and apply those overrides to its config.
+See the sweep YAML guide's target-script example for a minimal parser and
+config-application pattern.
 
 Flags:
 

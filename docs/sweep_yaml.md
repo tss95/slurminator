@@ -206,6 +206,77 @@ the base config because no process consumed the generated overrides. Treat
 "training entrypoint accepts config overrides" as part of the project contract,
 not as something Slurminator can infer.
 
+### Minimal Target-Script Support
+
+Your training script needs a CLI argument that accepts the forwarded
+`sweep_params` string and applies it to your own config system. The argument name
+is project-defined; it only has to match the command builder. For example, this
+Slurminator command:
+
+```bash
+python -m slurminator \
+  --yaml experiment_lists/small.yaml \
+  --simple-command-entrypoint "python train.py" \
+  --simple-command-config-arg "--config" \
+  --simple-command-sweep-params-arg "--overrides"
+```
+
+requires `train.py` to define and consume `--overrides`:
+
+```python
+import argparse
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+def parse_sweep_params(raw: str | None) -> dict[str, Any]:
+    """Parse Slurminator's semicolon-separated key=value override string."""
+    overrides: dict[str, Any] = {}
+    if not raw:
+        return overrides
+    for item in raw.split(";"):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise ValueError(f"Invalid override {item!r}; expected key=value.")
+        key, value = item.split("=", 1)
+        overrides[key.strip()] = yaml.safe_load(value)
+    return overrides
+
+
+def set_dotted(config: dict[str, Any], key: str, value: Any) -> None:
+    """Apply a dotted-path override to a nested dictionary config."""
+    target = config
+    parts = key.split(".")
+    for part in parts[:-1]:
+        existing = target.setdefault(part, {})
+        if not isinstance(existing, dict):
+            raise ValueError(f"Cannot set {key!r}; {part!r} is not a mapping.")
+        target = existing
+    target[parts[-1]] = value
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--config", required=True)
+parser.add_argument("--overrides", default="", help="Slurminator sweep_params string.")
+args = parser.parse_args()
+
+config = yaml.safe_load(Path(args.config).read_text())
+for key, value in parse_sweep_params(args.overrides).items():
+    set_dotted(config, key, value)
+
+train(config)
+```
+
+Projects that already use Hydra, OmegaConf, Pydantic settings, or another
+configuration layer should apply the same contract through that system instead
+of copying this dictionary helper. The important invariant is that every
+generated key in `sweep_params` is either accepted and applied, or rejected with
+a clear error before the run starts.
+
 ## Multiple Sweep Blocks
 
 One custom-sweep YAML can describe several separate experiment families:
