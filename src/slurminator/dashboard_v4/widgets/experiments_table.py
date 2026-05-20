@@ -6,15 +6,32 @@ import time
 from enum import Enum
 from typing import Any
 
+from rich.text import Text
 from textual.widgets import DataTable
 
 from slurminator.dashboard_v4.widgets.sparkline import SparklineThresholds, render_sparkline
+from slurminator.experiments import ExperimentStatus
+
+METRIC_VALUE_PRECISION = 4
+PROGRESS_PERCENTAGE_WIDTH = 5
+
+FAILED_STATES = {
+    ExperimentStatus.FAILED,
+    ExperimentStatus.CANCELLED,
+    ExperimentStatus.TIMEOUT,
+    ExperimentStatus.OOM,
+    ExperimentStatus.KILLED,
+}
 
 
 class ExperimentsTable(DataTable):
     """Main dashboard table for experiment rows."""
 
     BASE_COLUMNS = ("ID", "Dataset", "HPC", "State", "Progress", "Primary", "Secondary", "Queue/DT")
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._row_experiments: list[dict[str, Any]] = []
 
     def on_mount(self) -> None:
         """Initialize stable table columns."""
@@ -31,10 +48,15 @@ class ExperimentsTable(DataTable):
         sparkline_thresholds: SparklineThresholds | object | None = None,
     ) -> None:
         """Replace table rows with the latest experiment snapshot."""
-        cursor_row = min(max(self.cursor_row, 0), max(len(experiments) - 1, 0)) if experiments else 0
+        previous_key = None
+        if self._row_experiments and 0 <= self.cursor_row < len(self._row_experiments):
+            previous_key = _row_key(self._row_experiments[self.cursor_row], self.cursor_row)
+        rows = _sorted_experiments(experiments)
+        cursor_row = _resolve_cursor_row(rows, previous_key, self.cursor_row)
         self.clear(columns=True)
         self._build_columns(show_sparkline=show_sparkline)
-        for exp in experiments:
+        self._row_experiments = rows
+        for exp in rows:
             primary_name = exp.get("target_metric_name")
             primary_value = (
                 exp.get("target_metric_value")
@@ -47,22 +69,23 @@ class ExperimentsTable(DataTable):
                 _format_enum(exp.get("hpc_assignment")),
                 _format_status(exp.get("status")),
                 _format_progress(exp),
-                _format_metric(primary_name, primary_value),
+                _format_metric(exp, primary_name, primary_value),
             ]
             if show_sparkline:
                 cells.append(_format_sparkline(exp, primary_name, thresholds=sparkline_thresholds))
-            cells.append(_format_metric(exp.get("secondary_metric_name"), exp.get("secondary_metric_value")))
+            cells.append(_format_metric(exp, exp.get("secondary_metric_name"), exp.get("secondary_metric_value")))
             cells.append(_format_queue_delta(exp))
             self.add_row(*cells, key=str(exp.get("experiment_id", len(self.rows))))
-        if experiments:
+        if rows:
             self.move_cursor(row=cursor_row, column=0, animate=False)
 
     def selected_experiment(self, experiments: list[dict[str, Any]]) -> dict[str, Any] | None:
         """Return the row under the table cursor."""
-        if not experiments:
+        rows = self._row_experiments or _sorted_experiments(experiments)
+        if not rows:
             return None
-        row = min(max(self.cursor_row, 0), len(experiments) - 1)
-        return experiments[row]
+        row = min(max(self.cursor_row, 0), len(rows) - 1)
+        return rows[row]
 
     def _build_columns(self, *, show_sparkline: bool = False) -> None:
         columns = list(self.BASE_COLUMNS)
@@ -84,30 +107,184 @@ def _format_enum(value: object) -> str:
     return _text(value, "-")
 
 
-def _format_status(value: object) -> str:
+def _format_status(value: object) -> str | Text:
     text = _format_enum(value)
-    return text.upper() if text != "-" else text
+    label = text.upper() if text != "-" else text
+    status = value if isinstance(value, ExperimentStatus) else None
+    style = {
+        ExperimentStatus.PENDING: "cyan",
+        ExperimentStatus.PARTIAL: "yellow",
+        ExperimentStatus.QUEUED: "yellow",
+        ExperimentStatus.RUNNING: "green",
+        ExperimentStatus.COMPLETED: "bold green",
+        ExperimentStatus.FAILED: "bold red",
+        ExperimentStatus.CANCELLED: "bold red",
+        ExperimentStatus.TIMEOUT: "bold red",
+        ExperimentStatus.OOM: "bold red",
+        ExperimentStatus.KILLED: "bold red",
+    }.get(status)
+    return Text(label, style=style) if style else label
 
 
 def _format_progress(exp: dict[str, Any]) -> str:
-    current = exp.get("current_epoch", exp.get("current_step"))
-    total = exp.get("max_epochs", exp.get("max_steps"))
-    if current is not None and total:
-        try:
-            pct = float(current) / float(total) * 100.0
-        except (TypeError, ValueError, ZeroDivisionError):
-            return f"{current}/{total}"
-        return f"{current}/{total} {pct:.0f}%"
-    return "-"
+    current_step = exp.get("current_step")
+    max_steps = exp.get("max_steps")
+    if current_step is not None and max_steps not in (None, 0):
+        progress = _format_progress_values(current_step, max_steps)
+        speed = exp.get("it_per_sec_backbone")
+        if isinstance(speed, (int, float)) and speed > 0:
+            return f"{progress} @ {speed:.2f}it/s"
+        return progress
+
+    current_epoch = exp.get("current_epoch")
+    max_epochs = exp.get("max_epochs")
+    if current_epoch is not None and max_epochs not in (None, 0):
+        return _format_progress_values(current_epoch, max_epochs)
+    return "?"
 
 
-def _format_metric(name: object, value: object) -> str:
+def _format_progress_values(current: object, total: object) -> str:
+    try:
+        current_value = int(current)
+    except Exception:
+        current_value = current
+    try:
+        total_value = int(total)
+    except Exception:
+        total_value = total
+    try:
+        pct = (float(current) / float(total)) * 100.0
+    except (TypeError, ValueError, ZeroDivisionError):
+        return f"{current_value}/{total_value}"
+    return f"{current_value}/{total_value} {pct:{PROGRESS_PERCENTAGE_WIDTH}.1f}%"
+
+
+def _format_metric(exp: dict[str, Any], name: object, value: object) -> str | Text:
+    metric_key = str(name) if name else ""
+    metric_info = _metric_info_for(exp, metric_key)
+    current = _coerce_float(value)
+    best = _lookup_best_metric_value(exp, metric_info)
+    if current is None and value is not None:
+        return _format_metric_raw(metric_key, value)
+    if current is None and best is None:
+        return "-"
+    style = _metric_color(current, metric_info)
+    combined = _format_metric_pair(current, best, metric_info=metric_info)
+    label = _get_metric_label(metric_key, metric_info)
+    text = f"{label}={combined}" if label else combined
+    return Text(text, style=style) if style else text
+
+
+def _format_metric_raw(metric_key: str, value: object) -> str:
+    label = metric_key or "metric"
+    return f"{label}={value}"
+
+
+def _metric_info_for(exp: dict[str, Any], metric_key: str) -> dict[str, Any] | None:
+    metric_info = exp.get("display_metric_info") or exp.get("metric_info") or {}
+    info = metric_info.get(metric_key) if isinstance(metric_info, dict) else None
+    return info if isinstance(info, dict) else None
+
+
+def _get_metric_label(metric_key: str, metric_info: dict[str, Any] | None) -> str:
+    if not metric_key:
+        return "metric"
+    if isinstance(metric_info, dict):
+        return str(metric_info.get("shortform") or metric_info.get("label") or metric_key)
+    return metric_key
+
+
+def _lookup_best_metric_value(exp: dict[str, Any], metric_info: dict[str, Any] | None) -> float | None:
+    if not metric_info:
+        return None
+    best_key = metric_info.get("best_key")
+    if not best_key:
+        return None
+    all_metrics = exp.get("all_metrics", {})
+    for source in (exp, all_metrics if isinstance(all_metrics, dict) else {}):
+        if best_key in source:
+            return _coerce_float(source[best_key])
+    return None
+
+
+def _metric_color(value: float | None, metric_info: dict[str, Any] | None) -> str | None:
+    if value is None or not isinstance(metric_info, dict):
+        return None
+    threshold = metric_info.get("threshold")
+    if not isinstance(threshold, (int, float)):
+        return None
+    higher_better = metric_info.get("higher_better", True)
+    if higher_better is False:
+        return "green" if value <= threshold else "red"
+    return "green" if value >= threshold else "red"
+
+
+def _format_metric_pair(current: float | None, best: float | None, *, metric_info: dict[str, Any] | None = None) -> str:
+    value_format = metric_info.get("value_format") if isinstance(metric_info, dict) else None
+    current_text = _format_metric_number(current, value_format=value_format)
+    if best is None:
+        return current_text
+    return f"{current_text} ({_format_metric_number(best, value_format=value_format)})"
+
+
+def _format_metric_number(value: float | None, *, value_format: str | None = None) -> str:
     if value is None:
         return "-"
-    label = str(name) if name else "metric"
-    if isinstance(value, float):
-        return f"{label}={value:.4g}"
-    return f"{label}={value}"
+    if value_format == "integer":
+        return f"{int(round(value))}"
+    return f"{value:.{METRIC_VALUE_PRECISION}f}"
+
+
+def _coerce_float(value: object) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _sorted_experiments(experiments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = list(experiments)
+
+    def sort_key(exp: dict[str, Any]) -> tuple[int, int, float, float]:
+        status = exp.get("status")
+        if status == ExperimentStatus.RUNNING:
+            status_priority = 0
+        elif status == ExperimentStatus.COMPLETED:
+            status_priority = 1
+        else:
+            status_priority = 2
+        metric_info = _metric_info_for(exp, str(exp.get("target_metric_name") or ""))
+        sort_value = _coerce_float(
+            exp.get("target_metric_value") if exp.get("target_metric_value") is not None else exp.get("metric_value")
+        )
+        has_metric = sort_value is not None
+        metric_sort = _metric_sort_value(sort_value, metric_info)
+        last_ts = _coerce_float(exp.get("last_change_ts")) or 0.0
+        return status_priority, 0 if has_metric else 1, metric_sort, -last_ts
+
+    rows.sort(key=sort_key)
+    return rows
+
+
+def _metric_sort_value(value: float | None, metric_info: dict[str, Any] | None) -> float:
+    if value is None:
+        return float("inf")
+    higher_better = True if not isinstance(metric_info, dict) else metric_info.get("higher_better", True)
+    return -value if higher_better is not False else value
+
+
+def _resolve_cursor_row(rows: list[dict[str, Any]], previous_key: str | None, previous_row: int) -> int:
+    if not rows:
+        return 0
+    if previous_key is not None:
+        for index, exp in enumerate(rows):
+            if _row_key(exp, index) == previous_key:
+                return index
+    return min(max(previous_row, 0), len(rows) - 1)
+
+
+def _row_key(exp: dict[str, Any], fallback: int) -> str:
+    return str(exp.get("experiment_id", fallback))
 
 
 def _format_sparkline(exp: dict[str, Any], primary_metric: object, *, thresholds: SparklineThresholds | object | None):

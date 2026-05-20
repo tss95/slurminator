@@ -189,6 +189,78 @@ def test_textual_home_table_renders_and_cursor_moves(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_textual_home_renders_summary_progress_and_footer(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        orch._publish_dashboard_snapshot(_experiments())
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.pause(0.2)
+            screen = app.screen
+            summary = screen._last_summary_text.plain
+            assert "Pending: 1" in summary
+            assert "Running: 1" in summary
+            assert "Completed: 0" in summary
+
+            progress = screen._last_progress_text.plain
+            assert "Completed" in progress
+            assert "Progress" in progress
+            assert "Running" in progress
+            assert "1/1" in progress
+            assert "12%" in progress
+            assert "█" in progress
+
+            footer = screen._last_footer_text.plain
+            assert "0 / 2 completed" in footer
+            assert "2 left" in footer
+            assert "Submissions: active" in footer
+            assert "Limits: OLIVIA=1" in footer
+            assert "Host: OLIVIA" in footer
+            assert "Experiment: experiments" in footer
+            assert "Slurm: h=2h ram=auto gpu=1" in footer
+            assert "GPU quota: OLIVIA unavailable" in footer
+
+    asyncio.run(run())
+
+
+def test_textual_home_table_uses_status_colors_metric_colors_and_v3_order(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        exps = _experiments()
+        exps[0]["display_metric_info"]["loss"]["threshold"] = 1.0
+        completed = dict(exps[1])
+        completed.update(
+            {
+                "experiment_id": "exp-3",
+                "status": ExperimentStatus.COMPLETED,
+                "target_metric_name": "acc",
+                "target_metric_value": 0.9,
+                "display_metric_info": {"acc": {"higher_better": True, "threshold": 0.5}},
+            }
+        )
+        orch._publish_dashboard_snapshot([exps[1], completed, exps[0]])
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.pause(0.2)
+            table = app.screen.query_one(ExperimentsTable)
+            assert [table.get_row_at(row)[0] for row in range(table.row_count)] == ["exp-1", "exp-3", "exp-2"]
+            status_cell = table.get_row_at(0)[3]
+            primary_cell = table.get_row_at(0)[5]
+            assert isinstance(status_cell, Text)
+            assert status_cell.plain == "RUNNING"
+            assert status_cell.style == "green"
+            assert isinstance(primary_cell, Text)
+            assert primary_cell.plain == "loss=0.5000"
+            assert primary_cell.style == "green"
+            assert table.get_row_at(0)[4] == "1/4  25.0%"
+
+    asyncio.run(run())
+
+
 def test_textual_home_table_renders_sparkline_and_toggles_column(tmp_path: Path) -> None:
     async def run() -> None:
         orch = _orchestrator(tmp_path)

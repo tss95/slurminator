@@ -48,10 +48,14 @@ class TextualDashboardApp(App[None]):
     CSS = """
     HomeScreen {
         layout: vertical;
+        height: 100%;
+        width: 100%;
     }
 
     #home-content {
         height: 1fr;
+        min-height: 1;
+        width: 100%;
         layout: vertical;
     }
 
@@ -60,12 +64,19 @@ class TextualDashboardApp(App[None]):
         padding: 0 1;
     }
 
+    #progress-bars {
+        height: 1;
+        padding: 0 1;
+    }
+
     #exps {
         height: 1fr;
+        min-height: 1;
+        width: 100%;
     }
 
     #quota {
-        height: 1;
+        height: 3;
         padding: 0 1;
     }
 
@@ -198,7 +209,7 @@ class TextualDashboardApp(App[None]):
         return Path.cwd()
 
     def request_dashboard_exit(self) -> None:
-        """Exit the Textual UI while leaving the orchestrator loop alive."""
+        """Request graceful shutdown of both Textual and the orchestrator loop."""
         self.dashboard_exit_requested = True
         self.exit()
 

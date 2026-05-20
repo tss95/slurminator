@@ -1,8 +1,8 @@
 # Slurminator UI v4 Phase 4 Decisions
 
-This document records implementation decisions made while landing Phase 4
-Slices 0-5. It is not a replacement for the technical spec; it captures choices
-made where the spec left room for implementation detail.
+This document records implementation decisions made while landing Phase 4. It
+is not a replacement for the technical spec; it captures choices made where the
+spec left room for implementation detail.
 
 ## Slice 0: Git Provenance Capture
 
@@ -84,6 +84,28 @@ made where the spec left room for implementation detail.
   present and defaults to higher-is-better when unknown.
 - Multi-run overlays, attempt filtering/coloring, detail screens, and log
   screens remain out of scope for Slice 5.
+
+## Slice 7.5: Home Screen Parity Polish
+
+- No formal Slice 7.5 contract file is present in this checkout. This pass was
+  scoped as a narrow parity follow-up to design decision D2 and live review
+  feedback: restore the high-signal home-screen header/progress/footer elements
+  that v3 users rely on.
+- The v4 home screen now has a status summary line, three top progress bars
+  (`Completed`, aggregate run `Progress`, and `Running` slots), and a multi-line
+  footer with completion, sweep, update time, submission state, active limits,
+  host, experiment-file name, Slurm resource summary, and quota information.
+- Provider-backed quota footer rendering is enabled in v4 with the same
+  five-minute cache cadence as the Rich dashboard. If no provider-backed quota
+  can be read, v4 shows the provider's unavailable hint rather than hiding the
+  footer line.
+- The experiment table now applies v3-style status colors, metric threshold
+  colors, step-first progress formatting, and v3-like row ordering. Selection is
+  preserved by experiment id across refreshes so sorting does not make the
+  cursor jump to a different run.
+- The Textual layout gives the footer a fixed three-line area and leaves the
+  experiment table as the remaining flexible region, so terminal resizes should
+  reallocate table height instead of treating the table as a fixed block.
 
 ## Known Terminal Compatibility
 
