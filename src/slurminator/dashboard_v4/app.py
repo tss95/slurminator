@@ -78,6 +78,21 @@ class TextualDashboardApp(App[None]):
         height: 1fr;
         padding: 0 1;
     }
+
+    PerRunDetailScreen,
+    PerRunLogScreen {
+        layout: vertical;
+    }
+
+    #detail-scroll {
+        height: 1fr;
+        padding: 0 1;
+    }
+
+    #log {
+        height: 1fr;
+        padding: 0 1;
+    }
     """
 
     def __init__(

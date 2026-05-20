@@ -9,7 +9,9 @@ from textual.containers import Container
 from textual.screen import ModalScreen
 from textual.widgets import Label, ListItem, ListView
 
+from slurminator.dashboard_v4.detail_screen import PerRunDetailScreen
 from slurminator.dashboard_v4.keystrokes import PER_RUN_MENU_BINDINGS
+from slurminator.dashboard_v4.log_screen import PerRunLogScreen
 from slurminator.dashboard_v4.plot_screen import PerRunPlotScreen
 
 
@@ -33,8 +35,8 @@ class PerRunMenuScreen(ModalScreen[None]):
             Label(str(experiment_id), id="per-run-title"),
             ListView(
                 ListItem(Label("View plots"), id="view-plots"),
-                ListItem(Label("Details")),
-                ListItem(Label("Logs")),
+                ListItem(Label("View details"), id="view-details"),
+                ListItem(Label("View log tail"), id="view-log-tail"),
                 ListItem(Label("Cancel")),
                 ListItem(Label("Relaunch")),
                 ListItem(Label("Settings")),
@@ -47,6 +49,10 @@ class PerRunMenuScreen(ModalScreen[None]):
         """Dispatch placeholder menu selections that are in-scope for this slice."""
         if event.item.id == "view-plots":
             self.app.push_screen(PerRunPlotScreen(self.exp))
+        elif event.item.id == "view-details":
+            self.app.push_screen(PerRunDetailScreen(self.exp))
+        elif event.item.id == "view-log-tail":
+            self.app.push_screen(PerRunLogScreen(self.exp))
 
 
 __all__ = ["PerRunMenuScreen"]

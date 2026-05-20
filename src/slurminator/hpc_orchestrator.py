@@ -17,7 +17,7 @@ from slurminator.experiment_policy import resolve_extra_remote_dirs, resolve_res
 from slurminator.hpc_state import is_terminal_status
 from slurminator.plugins import CommandBuildContext, DefaultOrchestratorPlugin, OrchestratorPlugin
 from slurminator.connection_manager import HPCConnectionManager, HPCConnectionConfig
-from slurminator.log_gathering import LogGatheringContext, gather_logs
+from slurminator.log_gathering import LogGatheringContext, LogTailReadResult, gather_logs, read_log_tail_incremental
 from slurminator.reassignment import ReassignmentContext, maybe_reassign_experiments
 from slurminator.scheduler_polling import expand_short, map_state, poll_hpc, update_scheduler_statuses
 from slurminator.state_store import ExperimentStateStore, replace_exp_in_list
@@ -727,6 +727,41 @@ class HPCOrchestrator:
             projection_options=self.projection_options,
         )
         force_read_full_history_from_status(exp, context)
+
+    def read_log_tail_for(
+        self, exp: dict[str, Any], *, lines: int = 500, offsets: Mapping[str, int] | None = None
+    ) -> LogTailReadResult:
+        """Read recent or newly-appended Slurm log text for a dashboard screen."""
+        job_id = exp.get("job_id")
+        hpc_type = self._coerce_hpc_type(exp.get("hpc_assignment"))
+        if not job_id or hpc_type is None:
+            return LogTailReadResult(text="", offsets=dict(offsets or {}))
+        context = LogGatheringContext(
+            connection_manager=self.connection_manager,
+            hpc_configs=HPC_CONFIGS,
+            plugin=self.plugin,
+            is_local_hpc=self.is_local_hpc,
+            global_time_hours_override=self.time_hours_override,
+            retry_timeout_with_estimated_time=self.retry_timeout_with_estimated_time,
+            timeout_retry_buffer=self.timeout_retry_buffer,
+            timeout_retry_max_attempts=self.timeout_retry_max_attempts,
+        )
+        return read_log_tail_incremental(exp, str(job_id), hpc_type, context, lines=lines, offsets=offsets)
+
+    @staticmethod
+    def _coerce_hpc_type(value: object) -> HPCType | None:
+        if isinstance(value, HPCType):
+            return value
+        if value is None:
+            return None
+        text = str(value).strip()
+        try:
+            return HPCType(text)
+        except ValueError:
+            try:
+                return HPCType[text.upper()]
+            except KeyError:
+                return None
 
     def _extract_display_metrics(self, exp: dict) -> dict:
         """Extract display metrics for UI from target-schema display metadata.

@@ -1,5 +1,6 @@
 import asyncio
 import re
+import shlex
 import time
 from pathlib import Path
 
@@ -8,6 +9,8 @@ import pytest
 from slurminator.config import HPCType
 from slurminator.dashboard_v4.app import TextualDashboardApp
 from slurminator.dashboard_v4.commands import submit_command
+from slurminator.dashboard_v4.detail_screen import PerRunDetailScreen
+from slurminator.dashboard_v4.log_screen import PerRunLogScreen
 from slurminator.dashboard_v4.per_run_menu import PerRunMenuScreen
 from slurminator.dashboard_v4.plot_screen import PerRunPlotScreen
 from slurminator.dashboard_v4.widgets import ExperimentsTable
@@ -20,21 +23,45 @@ pytestmark = pytest.mark.unit
 
 
 class FakeConnection:
-    def __init__(self, history_payload: str = "") -> None:
+    def __init__(self, history_payload: str = "", files: dict[str, str] | None = None) -> None:
         self.history_payload = history_payload
+        self.files = files if files is not None else {}
 
     def run_command(self, _hpc_type, command, prefer_remote=False):  # noqa: ARG002
+        payload = self._payload_for_command(command)
         if command.startswith("stat "):
-            return str(len(self.history_payload.encode("utf-8"))), ""
+            return str(len(payload.encode("utf-8"))), ""
         if command.startswith("tail "):
-            match = re.search(r"tail -c \+(\d+)", command)
-            assert match is not None
-            start_index = int(match.group(1)) - 1
-            return self.history_payload.encode("utf-8")[start_index:].decode("utf-8"), ""
+            byte_match = re.search(r"tail -c \+(\d+)", command)
+            if byte_match is not None:
+                start_index = int(byte_match.group(1)) - 1
+                return payload.encode("utf-8")[start_index:].decode("utf-8"), ""
+            line_match = re.search(r"tail -n (\d+)", command)
+            if line_match is not None:
+                n_lines = int(line_match.group(1))
+                return "\n".join(payload.splitlines()[-n_lines:]) + ("\n" if payload.endswith("\n") else ""), ""
         return "", ""
 
     def close_all(self):
         return None
+
+    def _payload_for_command(self, command: str) -> str:
+        tokens = shlex.split(command)
+        for token in reversed(tokens):
+            if token.endswith(".out") or token.endswith(".err"):
+                path = token
+                break
+            if token.endswith(".jsonl"):
+                path = token
+                break
+        else:
+            path = ""
+        if path.endswith(".jsonl"):
+            return self.history_payload
+        for key, payload in self.files.items():
+            if path == key or path.endswith(key):
+                return payload
+        return ""
 
 
 def _orchestrator(tmp_path: Path, connection: FakeConnection | None = None) -> HPCOrchestrator:
@@ -42,7 +69,10 @@ def _orchestrator(tmp_path: Path, connection: FakeConnection | None = None) -> H
     exp_file = tmp_path / "experiments.yaml"
     exp_file.write_text("experiments: []\n", encoding="utf-8")
     return HPCOrchestrator(
-        str(exp_file), concurrency_limits={HPCType.OLIVIA: 1}, connection_manager=connection or FakeConnection()
+        str(exp_file),
+        concurrency_limits={HPCType.OLIVIA: 1},
+        connection_manager=connection or FakeConnection(),
+        is_local_hpc_fn=lambda _hpc_type: False,
     )
 
 
@@ -71,6 +101,19 @@ def _experiments() -> list[dict]:
             "dataset_name": "dataset-a",
             "status": ExperimentStatus.RUNNING,
             "hpc_assignment": HPCType.OLIVIA,
+            "job_id": "12345",
+            "save_path": "/remote/save",
+            "output_dir": "/remote/logs",
+            "requested_time_hours": 2,
+            "requested_gpu_count": 1,
+            "running_timestamp": 100.0,
+            "all_metrics": {"loss": 0.8, "acc": 0.6},
+            "sweep_params": "lr=0.1",
+            "sacct_snapshot": {"State": "RUNNING", "Elapsed": "00:01:00"},
+            "links": {"wandb_url": "https://wandb.test/run"},
+            "wandb_run_url": "https://wandb.test/top-level-run",
+            "git_sha_at_submission": {"project": "abc123", "slurminator": "def456"},
+            "notes": "watch validation loss",
             "current_epoch": 1,
             "max_epochs": 4,
             "target_metric_name": "loss",
@@ -212,6 +255,170 @@ def test_textual_per_run_menu_opens_plot_screen_for_selected_run(tmp_path: Path)
             await pilot.press("escape")
             await pilot.pause(0.1)
             assert isinstance(app.screen, PerRunMenuScreen)
+
+    asyncio.run(run())
+
+
+def test_textual_per_run_menu_opens_detail_and_log_screens(tmp_path: Path) -> None:
+    async def run() -> None:
+        connection = FakeConnection(files={"slurm-12345.out": "started\n", "slurm-12345.err": ""})
+        orch = _orchestrator(tmp_path, connection=connection)
+        orch._publish_dashboard_snapshot(_experiments())
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 36)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, PerRunMenuScreen)
+            actions = app.screen.query_one("#per-run-actions")
+            assert [child.id for child in actions.children[:3]] == ["view-plots", "view-details", "view-log-tail"]
+
+            actions.index = 1
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            assert isinstance(app.screen, PerRunDetailScreen)
+            assert app.screen.exp["experiment_id"] == "exp-1"
+
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, PerRunMenuScreen)
+
+            app.screen.query_one("#per-run-actions").index = 2
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            assert isinstance(app.screen, PerRunLogScreen)
+            assert app.screen.exp["experiment_id"] == "exp-1"
+
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, PerRunMenuScreen)
+
+    asyncio.run(run())
+
+
+def test_textual_detail_screen_renders_required_sections(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 36)) as pilot:
+            await app.push_screen(PerRunDetailScreen(_experiments()[0]))
+            await pilot.pause(0.2)
+            screen = app.screen
+            assert isinstance(screen, PerRunDetailScreen)
+            detail_text = screen._last_detail_text
+            assert "experiment_id: exp-1" in detail_text
+            assert "status: running" in detail_text
+            assert "job_id: 12345" in detail_text
+            assert "cluster: OLIVIA" in detail_text
+            assert "walltime: requested=2h used=00:01:00" in detail_text
+            assert "gpu_count: 1" in detail_text
+            assert "acc: 0.6" in detail_text
+            assert "loss: 0.8" in detail_text
+            assert "sweep_params: lr=0.1" in detail_text
+            assert "State: RUNNING" in detail_text
+            assert "wandb_url: https://wandb.test/run" in detail_text
+            assert "wandb_run_url: https://wandb.test/top-level-run" in detail_text
+            assert "project: abc123" in detail_text
+            assert "notes: watch validation loss" in detail_text
+
+    asyncio.run(run())
+
+
+def test_textual_detail_screen_empty_state_and_force_history_read(tmp_path: Path) -> None:
+    async def run() -> None:
+        connection = FakeConnection(history_payload=_history_jsonl())
+        orch = _orchestrator(tmp_path, connection=connection)
+        exp = {
+            "experiment_id": "exp-force",
+            "job_id": "12345",
+            "hpc_assignment": HPCType.OLIVIA,
+            "save_path": str(tmp_path),
+        }
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 36)) as pilot:
+            await app.push_screen(PerRunDetailScreen(exp))
+            await pilot.pause(0.2)
+            screen = app.screen
+            assert isinstance(screen, PerRunDetailScreen)
+            detail_text = screen._last_detail_text
+            assert "job_id: 12345" in detail_text
+            assert "cluster: OLIVIA" in detail_text
+            assert "loss: 0.8" in detail_text
+            assert "No data yet" in detail_text
+
+    asyncio.run(run())
+
+
+def test_textual_log_screen_tails_and_appends_new_lines(tmp_path: Path) -> None:
+    async def run() -> None:
+        files = {"slurm-12345.out": "out1\nout2\n", "slurm-12345.err": "err1\n"}
+        connection = FakeConnection(files=files)
+        orch = _orchestrator(tmp_path, connection=connection)
+        app = TextualDashboardApp(refresh_interval=60.0)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 36)) as pilot:
+            await app.push_screen(PerRunLogScreen(_experiments()[0]))
+            await pilot.pause(0.2)
+            screen = app.screen
+            assert isinstance(screen, PerRunLogScreen)
+            assert "out2" in screen._last_log_text
+            assert "err1" in screen._last_log_text
+            assert screen._offsets["stdout"] == len(files["slurm-12345.out"].encode("utf-8"))
+            assert screen._offsets["stderr"] == len(files["slurm-12345.err"].encode("utf-8"))
+
+            files["slurm-12345.out"] += "out3\n"
+            screen.refresh_log()
+            await pilot.pause(0.1)
+            assert "out3" in screen._last_log_text
+
+    asyncio.run(run())
+
+
+def test_textual_log_screen_scrollback_preserves_position_when_scrolled_up(tmp_path: Path) -> None:
+    async def run() -> None:
+        files = {"slurm-12345.out": "line1\nline2\n", "slurm-12345.err": ""}
+        connection = FakeConnection(files=files)
+        orch = _orchestrator(tmp_path, connection=connection)
+        app = TextualDashboardApp(refresh_interval=60.0)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 36)) as pilot:
+            await app.push_screen(PerRunLogScreen(_experiments()[0]))
+            await pilot.pause(0.2)
+            screen = app.screen
+            assert isinstance(screen, PerRunLogScreen)
+            assert screen._auto_scroll is True
+
+            screen.action_scroll_up()
+            assert screen._auto_scroll is False
+            files["slurm-12345.out"] += "line3\n"
+            screen.refresh_log()
+            await pilot.pause(0.1)
+            assert "line3" in screen._last_log_text
+            assert screen._auto_scroll is False
+
+    asyncio.run(run())
+
+
+def test_textual_log_screen_empty_state(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 36)) as pilot:
+            await app.push_screen(PerRunLogScreen({"experiment_id": "empty"}))
+            await pilot.pause(0.2)
+            screen = app.screen
+            assert isinstance(screen, PerRunLogScreen)
+            assert screen._last_log_text == "No data yet"
 
     asyncio.run(run())
 

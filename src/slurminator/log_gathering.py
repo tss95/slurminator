@@ -35,6 +35,15 @@ class LogGatheringContext:
     timeout_retry_max_attempts: int = 1
 
 
+@dataclass
+class LogTailReadResult:
+    """Result of one log-tail read."""
+
+    text: str
+    offsets: dict[str, int]
+    truncated: bool = False
+
+
 def gather_logs(exp: dict[str, Any], job_id: str, hpc_type: HPCType, context: LogGatheringContext) -> None:
     """Inspect Slurm logs and adjust terminal status when log evidence is stronger."""
     log_tail = read_log_tail(exp, job_id, hpc_type, context)
@@ -128,4 +137,72 @@ def read_log_tail(exp: dict[str, Any], job_id: str, hpc_type: HPCType, context: 
         return None
 
 
-__all__ = ["LogGatheringContext", "gather_logs", "read_log_tail"]
+def read_log_tail_incremental(
+    exp: dict[str, Any],
+    job_id: str,
+    hpc_type: HPCType,
+    context: LogGatheringContext,
+    *,
+    lines: int = 500,
+    offsets: Mapping[str, int] | None = None,
+) -> LogTailReadResult:
+    """Read recent or newly-appended Slurm stdout/stderr log text."""
+    out_dir = exp.get("output_dir")
+    if not out_dir:
+        return LogTailReadResult(text="", offsets={})
+
+    previous_offsets = dict(offsets or {})
+    paths = {"stdout": Path(out_dir) / f"slurm-{job_id}.out", "stderr": Path(out_dir) / f"slurm-{job_id}.err"}
+    new_offsets: dict[str, int] = {}
+    chunks: list[str] = []
+    truncated = False
+
+    for label, path in paths.items():
+        previous_offset = max(int(previous_offsets.get(label, 0) or 0), 0)
+        size = _log_file_size(path, hpc_type, context)
+        new_offsets[label] = size
+        if size <= 0:
+            continue
+
+        if previous_offset <= 0:
+            text = _tail_log_lines(path, lines, hpc_type, context)
+        elif size < previous_offset:
+            truncated = True
+            text = _tail_log_lines(path, lines, hpc_type, context)
+        elif size > previous_offset:
+            text = _tail_log_bytes(path, previous_offset, hpc_type, context)
+        else:
+            text = ""
+
+        if text:
+            chunks.append(f"===== {label}: {path} =====\n{text.rstrip()}\n")
+
+    return LogTailReadResult(text="\n".join(chunks).strip(), offsets=new_offsets, truncated=truncated)
+
+
+def _log_file_size(path: Path, hpc_type: HPCType, context: LogGatheringContext) -> int:
+    out = _run_log_command(f'stat -c "%s" {quote(str(path))} 2>/dev/null || echo 0', hpc_type, context)
+    try:
+        return max(int(str(out).strip().splitlines()[-1]), 0)
+    except Exception:
+        return 0
+
+
+def _tail_log_lines(path: Path, lines: int, hpc_type: HPCType, context: LogGatheringContext) -> str:
+    safe_lines = max(int(lines), 1)
+    return _run_log_command(f"tail -n {safe_lines} {quote(str(path))} 2>/dev/null || true", hpc_type, context)
+
+
+def _tail_log_bytes(path: Path, previous_offset: int, hpc_type: HPCType, context: LogGatheringContext) -> str:
+    return _run_log_command(f"tail -c +{previous_offset + 1} {quote(str(path))} 2>/dev/null || true", hpc_type, context)
+
+
+def _run_log_command(command: str, hpc_type: HPCType, context: LogGatheringContext) -> str:
+    if context.is_local_hpc(hpc_type):
+        result = subprocess.run(command, shell=True, capture_output=True, text=True)
+        return result.stdout
+    out, _ = context.connection_manager.run_command(hpc_type, command)
+    return out
+
+
+__all__ = ["LogGatheringContext", "LogTailReadResult", "gather_logs", "read_log_tail", "read_log_tail_incremental"]
