@@ -19,7 +19,6 @@ from slurminator.dashboard_v4.widgets import ExperimentsTable
 from slurminator.experiments import ExperimentStatus
 from slurminator.hpc_orchestrator import HPCOrchestrator
 from slurminator.schemas.status_schema import HistoryEntry
-from slurminator.ui_dashboard import TerminalDashboard
 
 pytestmark = pytest.mark.unit
 
@@ -144,11 +143,16 @@ def test_submit_command_writes_pending_command(tmp_path: Path) -> None:
 
 
 def test_orchestrator_dashboard_resolver_keeps_v3_and_resolves_v4(tmp_path: Path) -> None:
+    class PluginDashboard:
+        pass
+
     orch_v3 = _orchestrator(tmp_path / "v3")
+    orch_v3.dashboard_cls = PluginDashboard
     orch_v4 = _orchestrator(tmp_path / "v4")
+    orch_v4.dashboard_cls = PluginDashboard
     orch_v4.dashboard_ui = "v4"
 
-    assert orch_v3._resolve_dashboard_cls() is TerminalDashboard
+    assert orch_v3._resolve_dashboard_cls() is PluginDashboard
     assert orch_v4._resolve_dashboard_cls() is TextualDashboardApp
 
 

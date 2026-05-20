@@ -420,12 +420,12 @@ class HPCOrchestrator:
 
     def _resolve_dashboard_cls(self):
         """Resolve the concrete dashboard class for the requested UI version."""
-        if self.dashboard_cls is not None:
-            return self.dashboard_cls
         if str(self.dashboard_ui).strip().lower() == "v4":
             from slurminator.dashboard_v4.app import TextualDashboardApp
 
             return TextualDashboardApp
+        if self.dashboard_cls is not None:
+            return self.dashboard_cls
         from slurminator.ui_dashboard import TerminalDashboard
 
         return TerminalDashboard
