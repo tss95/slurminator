@@ -444,6 +444,8 @@ not as an authoritative accounting statement.
 Dashboard v4 is an optional Textual interface. Install it with
 `pip install "slurminator[v4]"`, then launch with `--dashboard-ui v4`. The
 default `--dashboard-ui v3` remains Rich-based and does not require Textual.
+Phase 4 implementation decisions are tracked in
+[`docs/slurminator_ui_v4_phase4_decisions.md`](docs/slurminator_ui_v4_phase4_decisions.md).
 
 ## Development
 
