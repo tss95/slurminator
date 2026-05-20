@@ -15,7 +15,6 @@ from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Static
 
 from slurminator.config import HPCType, HPC_CONFIGS
-from slurminator.dashboard_v4.commands import submit_command
 from slurminator.dashboard_v4.keystrokes import HOME_BINDINGS
 from slurminator.dashboard_v4.per_run_menu import PerRunMenuScreen
 from slurminator.dashboard_v4.widgets import ExperimentsTable
@@ -107,14 +106,6 @@ class HomeScreen(Screen[None]):
         exp = self.query_one(ExperimentsTable).selected_experiment(experiments)
         if exp is not None:
             self.app.push_screen(PerRunMenuScreen(exp))
-
-    def action_toggle_pause(self) -> None:
-        """Write a pause/resume command for the next orchestrator poll."""
-        orchestrator = getattr(self.app, "orchestrator", None)
-        action = (
-            "resume_submissions" if bool(getattr(orchestrator, "submissions_paused", False)) else "pause_submissions"
-        )
-        submit_command(self.app.command_save_path(), action, {})
 
     def action_toggle_sparkline(self) -> None:
         """Toggle the trajectory column."""

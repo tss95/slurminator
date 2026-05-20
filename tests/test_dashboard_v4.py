@@ -534,7 +534,7 @@ def test_textual_run_in_thread_wraps_signal_registration(monkeypatch) -> None:
     assert "previous" in result
 
 
-def test_textual_pause_resume_commands_are_observed_by_orchestrator(tmp_path: Path) -> None:
+def test_textual_home_p_does_not_write_pause_command(tmp_path: Path) -> None:
     async def run() -> None:
         orch = _orchestrator(tmp_path)
         exps = _experiments()
@@ -547,13 +547,9 @@ def test_textual_pause_resume_commands_are_observed_by_orchestrator(tmp_path: Pa
             await pilot.pause(0.2)
             await pilot.press("p")
             await pilot.pause(0.05)
-            assert orch._process_command_queue(exps) == 1
-            assert orch.submissions_paused is True
-
-            await pilot.press("p")
-            await pilot.pause(0.05)
-            assert orch._process_command_queue(exps) == 1
             assert orch.submissions_paused is False
+            assert _pending_commands(tmp_path) == []
+            assert orch._process_command_queue(exps) == 0
 
     asyncio.run(run())
 
@@ -860,7 +856,7 @@ def test_textual_q_requests_dashboard_exit(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-def test_textual_q_requests_dashboard_exit_from_modal(tmp_path: Path) -> None:
+def test_textual_q_does_not_request_dashboard_exit_from_modal(tmp_path: Path) -> None:
     async def run() -> None:
         orch = _orchestrator(tmp_path)
         orch._publish_dashboard_snapshot(_experiments())
@@ -875,8 +871,8 @@ def test_textual_q_requests_dashboard_exit_from_modal(tmp_path: Path) -> None:
 
             await pilot.press("q")
             await pilot.pause(0.05)
-            assert app.dashboard_exit_requested is True
-            assert orch._dashboard_exit_requested is True
+            assert app.dashboard_exit_requested is False
+            assert getattr(orch, "_dashboard_exit_requested", False) is False
 
     asyncio.run(run())
 

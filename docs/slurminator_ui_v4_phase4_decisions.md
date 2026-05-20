@@ -130,6 +130,10 @@ spec left room for implementation detail.
 - `cancel_all` submits the existing command action with `{"scope": "session"}`.
   The existing command handler only cancels queued/running jobs, so terminal
   runs are not touched.
+- Review adjustment: pause/resume is only exposed through the global menu, not
+  a direct home-screen `p` key, to avoid duplicate controls. Quit remains a
+  main summary view action only; nested menus and per-run screens use `Esc` to
+  return instead of offering a `q` shortcut.
 
 ## Known Terminal Compatibility
 

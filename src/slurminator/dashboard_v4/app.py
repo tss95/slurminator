@@ -45,7 +45,7 @@ else:  # pragma: no cover - non-Linux defensive
 class TextualDashboardApp(App[None]):
     """Textual dashboard implementing Slurminator's dashboard contract."""
 
-    BINDINGS = [("q", "quit", "Quit")]
+    BINDINGS: list[tuple[str, str, str]] = []
 
     CSS = """
     HomeScreen {
@@ -230,10 +230,6 @@ class TextualDashboardApp(App[None]):
         if self.orchestrator is not None:
             setattr(self.orchestrator, "_dashboard_exit_requested", True)
         self.exit()
-
-    def action_quit(self) -> None:
-        """Handle global quit from any v4 screen."""
-        self.request_dashboard_exit()
 
     def action_global_menu(self) -> None:
         """Open the global action menu."""
