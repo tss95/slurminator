@@ -1,6 +1,10 @@
 import asyncio
+import logging
 import re
+import signal
 import shlex
+import sys
+import threading
 import time
 from pathlib import Path
 
@@ -8,7 +12,7 @@ import pytest
 from rich.text import Text
 
 from slurminator.config import HPCType
-from slurminator.dashboard_v4.app import TextualDashboardApp
+from slurminator.dashboard_v4.app import TextualDashboardApp, suppress_thread_signal_registration
 from slurminator.dashboard_v4.commands import submit_command
 from slurminator.dashboard_v4.detail_screen import PerRunDetailScreen
 from slurminator.dashboard_v4.log_screen import PerRunLogScreen
@@ -232,6 +236,45 @@ def test_textual_dashboard_mount_render_contract(tmp_path: Path) -> None:
         time.sleep(0.1)
         assert app.orchestrator is orch
         assert app.get_dashboard_snapshot()[0]["experiment_id"] == "exp-1"
+
+
+def test_textual_dashboard_mount_quiets_console_logs(tmp_path: Path) -> None:
+    logger = logging.getLogger("slurminator")
+    previous_level = logger.level
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(logging.INFO)
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+
+    try:
+        orch = _orchestrator(tmp_path)
+        app = TextualDashboardApp(refresh_interval=0.05, headless=True)
+        with app.mount(orch):
+            assert handler.level == logging.WARNING
+        assert handler.level == logging.INFO
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+
+
+def test_textual_thread_signal_registration_is_ignored() -> None:
+    result: dict[str, object] = {}
+    signal_number = getattr(signal, "SIGTSTP", signal.SIGTERM)
+
+    def register_signal_in_thread() -> None:
+        try:
+            with suppress_thread_signal_registration():
+                result["previous"] = signal.signal(signal_number, lambda *_args: None)
+        except BaseException as exc:  # pragma: no cover - assertion payload
+            result["error"] = exc
+
+    thread = threading.Thread(target=register_signal_in_thread)
+    thread.start()
+    thread.join(timeout=2.0)
+
+    assert not thread.is_alive()
+    assert "error" not in result
+    assert "previous" in result
 
 
 def test_textual_pause_resume_commands_are_observed_by_orchestrator(tmp_path: Path) -> None:

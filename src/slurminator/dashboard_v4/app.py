@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import copy
 import logging
+import signal
+import sys
 import threading
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from textual.app import App
 from textual.widget import Widget
@@ -16,6 +18,25 @@ from slurminator.dashboard_v4.home_screen import HomeScreen
 from slurminator.dashboard_v4.widgets import SparklineThresholds
 
 logger = logging.getLogger("slurminator")
+CONSOLE_LOG_LEVEL_WHILE_ACTIVE = logging.WARNING
+
+try:
+    from textual.drivers.linux_driver import LinuxDriver
+except Exception:  # pragma: no cover - platform/import defensive
+    LinuxDriver = None  # type: ignore[assignment]
+
+
+if LinuxDriver is not None:
+
+    class ThreadFriendlyLinuxDriver(LinuxDriver):
+        """Linux driver variant that tolerates Textual running outside the main thread."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            with suppress_thread_signal_registration():
+                super().__init__(*args, **kwargs)
+
+else:  # pragma: no cover - non-Linux defensive
+    ThreadFriendlyLinuxDriver = None  # type: ignore[assignment]
 
 
 class TextualDashboardApp(App[None]):
@@ -107,6 +128,8 @@ class TextualDashboardApp(App[None]):
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
+        if LinuxDriver is not None and self.driver_class is LinuxDriver:
+            self.driver_class = ThreadFriendlyLinuxDriver
         self.n_recent = n_recent
         self.refresh_interval = refresh_interval
         self.ui_version = ui_version
@@ -212,12 +235,69 @@ class _TextualDashboardSession(AbstractContextManager[TextualDashboardApp]):
 
     def __enter__(self) -> TextualDashboardApp:
         self.app._attach_orchestrator(self.orchestrator)
+        self._log_context = quiet_dashboard_console_logs()
+        self._log_context.__enter__()
         self.app._start_background()
         return self.app
 
     def __exit__(self, exc_type, exc, traceback) -> bool:
         self.app._stop_background()
+        self._log_context.__exit__(exc_type, exc, traceback)
         return False
+
+
+@contextmanager
+def suppress_thread_signal_registration() -> Iterator[None]:
+    """Ignore ``signal.signal`` calls that cannot work outside the main thread."""
+    if threading.current_thread() is threading.main_thread():
+        yield
+        return
+
+    original_signal = signal.signal
+
+    def thread_safe_signal(signum: int, handler: Any) -> Any:
+        try:
+            return original_signal(signum, handler)
+        except ValueError as exc:
+            if "main thread" not in str(exc):
+                raise
+            try:
+                return signal.getsignal(signum)
+            except Exception:
+                return None
+
+    signal.signal = thread_safe_signal  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        signal.signal = original_signal  # type: ignore[assignment]
+
+
+@contextmanager
+def quiet_dashboard_console_logs(
+    *, level: int = CONSOLE_LOG_LEVEL_WHILE_ACTIVE, logger_names: tuple[str, ...] = ("slurminator", "PMT")
+) -> Iterator[None]:
+    """Raise console log handler thresholds while the Textual dashboard owns the terminal."""
+    states: list[tuple[logging.Handler, int]] = []
+    for logger_name in logger_names:
+        active_logger = logging.getLogger(logger_name)
+        for handler in active_logger.handlers:
+            if not _is_console_stream_handler(handler):
+                continue
+            states.append((handler, handler.level))
+            handler.setLevel(level if handler.level <= logging.NOTSET else max(handler.level, level))
+    try:
+        yield
+    finally:
+        for handler, previous_level in states:
+            handler.setLevel(previous_level)
+
+
+def _is_console_stream_handler(handler: logging.Handler) -> bool:
+    if not isinstance(handler, logging.StreamHandler):
+        return False
+    stream = getattr(handler, "stream", None)
+    return stream in {sys.stdout, sys.stderr, sys.__stdout__, sys.__stderr__}
 
 
 __all__ = ["TextualDashboardApp"]
