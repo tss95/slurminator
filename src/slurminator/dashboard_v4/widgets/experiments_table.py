@@ -8,6 +8,8 @@ from typing import Any
 
 from textual.widgets import DataTable
 
+from slurminator.dashboard_v4.widgets.sparkline import SparklineThresholds, render_sparkline
+
 
 class ExperimentsTable(DataTable):
     """Main dashboard table for experiment rows."""
@@ -21,25 +23,35 @@ class ExperimentsTable(DataTable):
         self.show_cursor = True
         self._build_columns()
 
-    def update_experiments(self, experiments: list[dict[str, Any]], *, show_sparkline: bool = False) -> None:
+    def update_experiments(
+        self,
+        experiments: list[dict[str, Any]],
+        *,
+        show_sparkline: bool = False,
+        sparkline_thresholds: SparklineThresholds | object | None = None,
+    ) -> None:
         """Replace table rows with the latest experiment snapshot."""
         cursor_row = min(max(self.cursor_row, 0), max(len(experiments) - 1, 0)) if experiments else 0
         self.clear(columns=True)
         self._build_columns(show_sparkline=show_sparkline)
         for exp in experiments:
+            primary_name = exp.get("target_metric_name")
+            primary_value = (
+                exp.get("target_metric_value")
+                if exp.get("target_metric_value") is not None
+                else exp.get("metric_value")
+            )
             cells = [
                 _text(exp.get("experiment_id"), "-"),
                 _text(exp.get("dataset_name") or exp.get("dataset") or exp.get("config"), "-"),
                 _format_enum(exp.get("hpc_assignment")),
                 _format_status(exp.get("status")),
                 _format_progress(exp),
-                _format_metric(
-                    exp.get("target_metric_name"), exp.get("target_metric_value") or exp.get("metric_value")
-                ),
-                _format_metric(exp.get("secondary_metric_name"), exp.get("secondary_metric_value")),
+                _format_metric(primary_name, primary_value),
             ]
             if show_sparkline:
-                cells.append("")
+                cells.append(_format_sparkline(exp, primary_name, thresholds=sparkline_thresholds))
+            cells.append(_format_metric(exp.get("secondary_metric_name"), exp.get("secondary_metric_value")))
             cells.append(_format_queue_delta(exp))
             self.add_row(*cells, key=str(exp.get("experiment_id", len(self.rows))))
         if experiments:
@@ -96,6 +108,40 @@ def _format_metric(name: object, value: object) -> str:
     if isinstance(value, float):
         return f"{label}={value:.4g}"
     return f"{label}={value}"
+
+
+def _format_sparkline(exp: dict[str, Any], primary_metric: object, *, thresholds: SparklineThresholds | object | None):
+    metric_name = str(primary_metric) if primary_metric else ""
+    values = _history_metric_values(exp, metric_name)
+    if len(values) < 2:
+        return "-"
+    return render_sparkline(values, width=20, higher_better=_higher_better(exp, metric_name), thresholds=thresholds)
+
+
+def _history_metric_values(exp: dict[str, Any], metric_name: str) -> list[float]:
+    if not metric_name:
+        return []
+    values: list[float] = []
+    history = exp.get("history")
+    if not isinstance(history, list):
+        return values
+    for entry in history:
+        metrics = entry.get("metrics") if isinstance(entry, dict) else None
+        if not isinstance(metrics, dict) or metric_name not in metrics:
+            continue
+        try:
+            values.append(float(metrics[metric_name]))
+        except (TypeError, ValueError):
+            continue
+    return values
+
+
+def _higher_better(exp: dict[str, Any], metric_name: str) -> bool | None:
+    metric_info = exp.get("display_metric_info") or exp.get("metric_info") or {}
+    info = metric_info.get(metric_name) if isinstance(metric_info, dict) else None
+    if isinstance(info, dict) and "higher_better" in info:
+        return bool(info["higher_better"])
+    return None
 
 
 def _format_queue_delta(exp: dict[str, Any]) -> str:

@@ -13,6 +13,7 @@ from textual.app import App
 from textual.widget import Widget
 
 from slurminator.dashboard_v4.home_screen import HomeScreen
+from slurminator.dashboard_v4.widgets import SparklineThresholds
 
 logger = logging.getLogger("slurminator")
 
@@ -102,6 +103,7 @@ class TextualDashboardApp(App[None]):
         ui_version: str = "v4",
         *,
         headless: bool = False,
+        sparkline_thresholds: SparklineThresholds | object | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -110,7 +112,8 @@ class TextualDashboardApp(App[None]):
         self.ui_version = ui_version
         self.headless = headless
         self.orchestrator: Any | None = None
-        self.sparkline_enabled = False
+        self.sparkline_enabled = True
+        self.sparkline_thresholds = sparkline_thresholds or SparklineThresholds()
         self.dashboard_exit_requested = False
         self._dashboard_snapshot: list[dict[str, Any]] = []
         self._snapshot_lock = threading.Lock()

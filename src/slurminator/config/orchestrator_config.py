@@ -19,12 +19,22 @@ class TimeoutRiskSettings:
 
 
 @dataclass
+class SparklineSettings:
+    """Dashboard v4 sparkline trend-color thresholds."""
+
+    flat_slope_norm: float = 0.01
+    directional_slope_norm: float = 0.02
+    oscillation_residual_norm: float = 0.10
+
+
+@dataclass
 class DashboardSettings:
     """Dashboard behavior settings."""
 
     ui_version: str = "v3"
     poll_interval_seconds: int = 30
     timeout_risk: TimeoutRiskSettings = field(default_factory=TimeoutRiskSettings)
+    sparkline: SparklineSettings = field(default_factory=SparklineSettings)
 
 
 @dataclass
@@ -144,6 +154,7 @@ def parse_orchestrator_settings(
     orchestrator_raw = _mapping_or_empty(raw.get("orchestrator")) if "orchestrator" in raw else _mapping_or_empty(raw)
     dashboard_raw = _mapping_or_empty(orchestrator_raw.get("dashboard"))
     timeout_raw = _mapping_or_empty(dashboard_raw.get("timeout_risk"))
+    sparkline_raw = _mapping_or_empty(dashboard_raw.get("sparkline"))
     retry_raw = _mapping_or_empty(orchestrator_raw.get("retry"))
     polling_raw = _mapping_or_empty(orchestrator_raw.get("polling"))
     command_raw = _mapping_or_empty(orchestrator_raw.get("command"))
@@ -195,6 +206,40 @@ def parse_orchestrator_settings(
     timeout_settings.medium_ratio = max(0.0, timeout_settings.medium_ratio)
     timeout_settings.high_ratio = max(timeout_settings.medium_ratio, timeout_settings.high_ratio)
 
+    sparkline_defaults = SparklineSettings()
+    sparkline_settings = SparklineSettings(
+        flat_slope_norm=max(
+            0.0,
+            _coerce_float(
+                sparkline_raw.get("flat_slope_norm"),
+                sparkline_defaults.flat_slope_norm,
+                "dashboard.sparkline.flat_slope_norm",
+                logger=logger,
+                source=source,
+            ),
+        ),
+        directional_slope_norm=max(
+            0.0,
+            _coerce_float(
+                sparkline_raw.get("directional_slope_norm"),
+                sparkline_defaults.directional_slope_norm,
+                "dashboard.sparkline.directional_slope_norm",
+                logger=logger,
+                source=source,
+            ),
+        ),
+        oscillation_residual_norm=max(
+            0.0,
+            _coerce_float(
+                sparkline_raw.get("oscillation_residual_norm"),
+                sparkline_defaults.oscillation_residual_norm,
+                "dashboard.sparkline.oscillation_residual_norm",
+                logger=logger,
+                source=source,
+            ),
+        ),
+    )
+
     dashboard_defaults = DashboardSettings()
     dashboard_settings = DashboardSettings(
         ui_version=str(dashboard_raw.get("ui_version", dashboard_defaults.ui_version)),
@@ -209,6 +254,7 @@ def parse_orchestrator_settings(
             ),
         ),
         timeout_risk=timeout_settings,
+        sparkline=sparkline_settings,
     )
 
     retry_defaults = RetrySettings()
@@ -291,6 +337,7 @@ __all__ = [
     "OrchestratorSettings",
     "PollSettings",
     "RetrySettings",
+    "SparklineSettings",
     "TimeoutRiskSettings",
     "parse_orchestrator_settings",
 ]

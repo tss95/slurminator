@@ -45,7 +45,9 @@ class HomeScreen(Screen[None]):
         experiments = self.app.get_dashboard_snapshot()
         self.query_one("#summary", Static).update(self._summary_text(experiments))
         self.query_one(ExperimentsTable).update_experiments(
-            experiments, show_sparkline=bool(getattr(self.app, "sparkline_enabled", False))
+            experiments,
+            show_sparkline=bool(getattr(self.app, "sparkline_enabled", False)),
+            sparkline_thresholds=getattr(self.app, "sparkline_thresholds", None),
         )
         self.query_one("#quota", Static).update(self._quota_footer_text(experiments))
 
@@ -71,6 +73,11 @@ class HomeScreen(Screen[None]):
             "resume_submissions" if bool(getattr(orchestrator, "submissions_paused", False)) else "pause_submissions"
         )
         submit_command(self.app.command_save_path(), action, {})
+
+    def action_toggle_sparkline(self) -> None:
+        """Toggle the trajectory column."""
+        self.app.sparkline_enabled = not bool(getattr(self.app, "sparkline_enabled", False))
+        self.refresh_from_orchestrator()
 
     def action_quit(self) -> None:
         """Close the dashboard UI without stopping the orchestrator."""

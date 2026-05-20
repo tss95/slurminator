@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 import pytest
+from rich.text import Text
 
 from slurminator.config import HPCType
 from slurminator.dashboard_v4.app import TextualDashboardApp
@@ -13,6 +14,7 @@ from slurminator.dashboard_v4.detail_screen import PerRunDetailScreen
 from slurminator.dashboard_v4.log_screen import PerRunLogScreen
 from slurminator.dashboard_v4.per_run_menu import PerRunMenuScreen
 from slurminator.dashboard_v4.plot_screen import PerRunPlotScreen
+from slurminator.dashboard_v4.widgets.sparkline import render_sparkline, slope_color
 from slurminator.dashboard_v4.widgets import ExperimentsTable
 from slurminator.experiments import ExperimentStatus
 from slurminator.hpc_orchestrator import HPCOrchestrator
@@ -163,6 +165,7 @@ def test_textual_home_table_renders_and_cursor_moves(tmp_path: Path) -> None:
             table = app.screen.query_one(ExperimentsTable)
             assert table.row_count == 2
             assert table.get_row_at(0)[0] == "exp-1"
+            assert len(table.get_row_at(0)) == 9
             assert table.cursor_row == 0
 
             await pilot.press("down")
@@ -174,6 +177,45 @@ def test_textual_home_table_renders_and_cursor_moves(tmp_path: Path) -> None:
             assert table.cursor_row == 0
 
     asyncio.run(run())
+
+
+def test_textual_home_table_renders_sparkline_and_toggles_column(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        orch._publish_dashboard_snapshot(_experiments())
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.pause(0.2)
+            table = app.screen.query_one(ExperimentsTable)
+            trajectory = table.get_row_at(0)[6]
+            assert isinstance(trajectory, Text)
+            assert trajectory.style == "dim"
+            assert trajectory.plain.endswith("." * 18)
+
+            await pilot.press("s")
+            await pilot.pause(0.1)
+            assert app.sparkline_enabled is False
+            assert len(table.get_row_at(0)) == 8
+
+            await pilot.press("s")
+            await pilot.pause(0.1)
+            assert app.sparkline_enabled is True
+            assert len(table.get_row_at(0)) == 9
+
+    asyncio.run(run())
+
+
+def test_sparkline_color_matches_metric_direction() -> None:
+    improving_accuracy = render_sparkline([0.1, 0.2, 0.3, 0.4], higher_better=True)
+    worsening_accuracy = render_sparkline([0.4, 0.3, 0.2, 0.1], higher_better=True)
+    improving_loss = render_sparkline([1.0, 0.8, 0.6, 0.4], higher_better=False)
+
+    assert improving_accuracy.style == "green"
+    assert worsening_accuracy.style == "red"
+    assert improving_loss.style == "green"
+    assert slope_color([0.1, 0.4, 0.4, 0.1], higher_better=True) == "yellow"
 
 
 def test_textual_dashboard_mount_render_contract(tmp_path: Path) -> None:

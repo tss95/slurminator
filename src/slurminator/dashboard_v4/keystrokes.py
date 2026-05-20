@@ -7,6 +7,7 @@ HOME_BINDINGS = [
     Binding("down", "cursor_down", "Down"),
     Binding("enter", "drill_in", "Drill in"),
     Binding("p,P", "toggle_pause", "Pause/resume"),
+    Binding("s", "toggle_sparkline", "Sparkline"),
     Binding("q", "quit", "Quit"),
     Binding("escape", "noop", "", show=False),
 ]

@@ -122,6 +122,9 @@ def test_cli_uses_orchestrator_config_simple_command_defaults(monkeypatch, tmp_p
                 "  config_arg: --cfg",
                 "  sweep_params_arg: --overrides",
                 "  extra_args: [--quiet]",
+                "dashboard:",
+                "  sparkline:",
+                "    directional_slope_norm: 0.04",
                 "",
             ]
         )
@@ -155,6 +158,7 @@ def test_cli_uses_orchestrator_config_simple_command_defaults(monkeypatch, tmp_p
     assert captured["plugin"].config_arg == "--cfg"
     assert captured["plugin"].sweep_params_arg == "--overrides"
     assert captured["plugin"].extra_args == ("--quiet",)
+    assert captured["dashboard_settings"].sparkline.directional_slope_norm == pytest.approx(0.04)
     assert captured["ran"] is True
 
 

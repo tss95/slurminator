@@ -245,6 +245,7 @@ def run_orchestrator_cli(
         connection_manager=early_connection_manager,
         plugin=plugin,
         partition_overrides=partition_overrides,
+        dashboard_settings=loaded_config.orchestrator.dashboard if loaded_config is not None else None,
     )
     orchestrator.run()
 

@@ -96,6 +96,7 @@ class HPCOrchestrator:
         parse_overrides: Optional[Callable[[list[str] | str], dict[str, Any]]] = None,
         is_local_hpc_fn: Optional[IsLocalHPC] = None,
         dashboard_cls: Optional[Type[Any]] = None,
+        dashboard_settings: object | None = None,
         overview_printer: Optional[OverviewPrinter] = None,
     ):
         self.experiment_file = Path(experiment_file).resolve()
@@ -128,6 +129,7 @@ class HPCOrchestrator:
 
         self.debug = debug
         self.dashboard_ui = dashboard_ui
+        self.dashboard_settings = dashboard_settings
         self.retry_timeout_with_estimated_time = retry_timeout_with_estimated_time
         self.timeout_retry_buffer = timeout_retry_buffer
         self.timeout_retry_max_attempts = timeout_retry_max_attempts
@@ -365,7 +367,10 @@ class HPCOrchestrator:
                     time.sleep(self.poll_interval)
             else:
                 DashboardCls = self._resolve_dashboard_cls()
-                dash = DashboardCls(n_recent=0, ui_version=self.dashboard_ui)
+                dashboard_kwargs = {"n_recent": 0, "ui_version": self.dashboard_ui}
+                if str(self.dashboard_ui).strip().lower() == "v4":
+                    dashboard_kwargs["sparkline_thresholds"] = getattr(self.dashboard_settings, "sparkline", None)
+                dash = DashboardCls(**dashboard_kwargs)
 
                 with dash.mount(self) as live:
                     while True:
