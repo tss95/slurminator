@@ -9,7 +9,9 @@ from textual.containers import Container
 from textual.screen import ModalScreen
 from textual.widgets import Label, ListItem, ListView
 
+from slurminator.dashboard_v4.commands import submit_command
 from slurminator.dashboard_v4.detail_screen import PerRunDetailScreen
+from slurminator.dashboard_v4.forms.relaunch_form import RelaunchFormScreen
 from slurminator.dashboard_v4.keystrokes import PER_RUN_MENU_BINDINGS
 from slurminator.dashboard_v4.log_screen import PerRunLogScreen
 from slurminator.dashboard_v4.plot_screen import PerRunPlotScreen
@@ -37,9 +39,9 @@ class PerRunMenuScreen(ModalScreen[None]):
                 ListItem(Label("View plots"), id="view-plots"),
                 ListItem(Label("View details"), id="view-details"),
                 ListItem(Label("View log tail"), id="view-log-tail"),
-                ListItem(Label("Cancel")),
-                ListItem(Label("Relaunch")),
-                ListItem(Label("Settings")),
+                ListItem(Label("Cancel run"), id="cancel-run"),
+                ListItem(Label("Relaunch"), id="relaunch-run"),
+                ListItem(Label("Settings"), id="settings"),
                 id="per-run-actions",
             ),
             id="per-run-menu",
@@ -53,6 +55,14 @@ class PerRunMenuScreen(ModalScreen[None]):
             self.app.push_screen(PerRunDetailScreen(self.exp))
         elif event.item.id == "view-log-tail":
             self.app.push_screen(PerRunLogScreen(self.exp))
+        elif event.item.id == "cancel-run":
+            target = {"experiment_id": self.exp.get("experiment_id")}
+            if self.exp.get("job_id") is not None:
+                target["job_id"] = self.exp.get("job_id")
+            submit_command(self.app.command_save_path(), "cancel_run", target)
+            self.app.pop_screen()
+        elif event.item.id == "relaunch-run":
+            self.app.push_screen(RelaunchFormScreen(self.exp))
 
 
 __all__ = ["PerRunMenuScreen"]

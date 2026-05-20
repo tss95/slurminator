@@ -10,6 +10,7 @@ from slurminator.command_queue import (
     default_command_handlers,
     handle_cancel_all,
     handle_cancel_run,
+    handle_relaunch_run,
     handle_pause_submissions,
     handle_resume_submissions,
     handle_set_concurrency_limit,
@@ -98,6 +99,80 @@ def test_handle_cancel_all_issues_scancel_for_all_active_runs(tmp_path) -> None:
     handle_cancel_all(_command("cancel_all", {"scope": "session"}), _context(tmp_path, exps, connection=connection))
 
     assert connection.commands == [(HPCType.OLIVIA, "scancel 1", True), (HPCType.FOX, "scancel 2", True)]
+
+
+def test_handle_relaunch_run_resets_terminal_experiment_for_submission(tmp_path) -> None:
+    exp = {
+        "experiment_id": "exp-1",
+        "status": "ExperimentStatus.FAILED",
+        "hpc_assignment": HPCType.OLIVIA,
+        "job_id": "12345",
+        "queued_timestamp": 1.0,
+        "running_timestamp": 2.0,
+        "failed_timestamp": 3.0,
+        "output_dir": "/old/logs",
+        "save_path": "/remote/save",
+        "history": [{"epoch": 1}],
+        "history_last_read_offset": 100,
+        "sweep_params": "lr=0.1",
+    }
+
+    handle_relaunch_run(
+        _command("relaunch_run", {"experiment_id": "exp-1", "job_id": "12345"}), _context(tmp_path, [exp])
+    )
+
+    assert exp["status"] == ExperimentStatus.PENDING
+    assert exp["hpc_assignment"] == HPCType.OLIVIA
+    assert exp["save_path"] == "/remote/save"
+    assert exp["sweep_params"] == "lr=0.1"
+    assert exp["manual_relaunch_count"] == 1
+    assert exp["relaunch_previous_status"] == "failed"
+    assert exp["relaunch_source_job_id"] == "12345"
+    assert isinstance(exp["relaunch_requested_at"], float)
+    for key in [
+        "job_id",
+        "queued_timestamp",
+        "running_timestamp",
+        "failed_timestamp",
+        "output_dir",
+        "history",
+        "history_last_read_offset",
+    ]:
+        assert key not in exp
+
+
+def test_handle_relaunch_run_rejects_active_experiment(tmp_path) -> None:
+    exp = {
+        "experiment_id": "exp-1",
+        "status": ExperimentStatus.RUNNING,
+        "hpc_assignment": HPCType.OLIVIA,
+        "job_id": "12345",
+    }
+
+    with pytest.raises(ValueError, match="cannot relaunch"):
+        handle_relaunch_run(
+            _command("relaunch_run", {"experiment_id": "exp-1", "job_id": "12345"}), _context(tmp_path, [exp])
+        )
+
+    assert exp["status"] == ExperimentStatus.RUNNING
+    assert exp["job_id"] == "12345"
+
+
+def test_handle_relaunch_run_rejects_stale_job_id(tmp_path) -> None:
+    exp = {
+        "experiment_id": "exp-1",
+        "status": ExperimentStatus.FAILED,
+        "hpc_assignment": HPCType.OLIVIA,
+        "job_id": "new-job",
+    }
+
+    with pytest.raises(ValueError, match="stale relaunch command"):
+        handle_relaunch_run(
+            _command("relaunch_run", {"experiment_id": "exp-1", "job_id": "old-job"}), _context(tmp_path, [exp])
+        )
+
+    assert exp["status"] == ExperimentStatus.FAILED
+    assert exp["job_id"] == "new-job"
 
 
 def test_pause_and_resume_submission_handlers_are_idempotent(tmp_path) -> None:

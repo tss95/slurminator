@@ -19,6 +19,7 @@ from slurminator.config import HPCType
 from slurminator.dashboard_v4.app import TextualDashboardApp, suppress_thread_signal_registration
 from slurminator.dashboard_v4.commands import submit_command
 from slurminator.dashboard_v4.detail_screen import PerRunDetailScreen
+from slurminator.dashboard_v4.forms.relaunch_form import RelaunchFormScreen
 from slurminator.dashboard_v4.global_menu import GlobalMenuScreen
 from slurminator.dashboard_v4.log_screen import PerRunLogScreen
 from slurminator.dashboard_v4.per_run_menu import PerRunMenuScreen
@@ -636,6 +637,76 @@ def test_textual_per_run_menu_opens_detail_and_log_screens(tmp_path: Path) -> No
             await pilot.press("escape")
             await pilot.pause(0.1)
             assert isinstance(app.screen, PerRunMenuScreen)
+
+    asyncio.run(run())
+
+
+def test_textual_per_run_menu_cancel_writes_cancel_run_command(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 36)) as pilot:
+            await app.push_screen(PerRunMenuScreen(_experiments()[0]))
+            await pilot.pause(0.1)
+            actions = app.screen.query_one("#per-run-actions")
+            actions.index = 3
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+
+            commands = _pending_commands(tmp_path)
+            assert len(commands) == 1
+            assert commands[0].action == "cancel_run"
+            assert commands[0].target == {"experiment_id": "exp-1", "job_id": "12345"}
+
+    asyncio.run(run())
+
+
+def test_textual_per_run_menu_relaunch_writes_relaunch_command(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+        exp = dict(_experiments()[0])
+        exp["status"] = ExperimentStatus.FAILED
+
+        async with app.run_test(size=(120, 36)) as pilot:
+            await app.push_screen(PerRunMenuScreen(exp))
+            await pilot.pause(0.1)
+            actions = app.screen.query_one("#per-run-actions")
+            actions.index = 4
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, RelaunchFormScreen)
+            assert app.screen.query_one("#relaunch-actions").children[0].id == "confirm-relaunch"
+
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+
+            commands = _pending_commands(tmp_path)
+            assert len(commands) == 1
+            assert commands[0].action == "relaunch_run"
+            assert commands[0].target == {"experiment_id": "exp-1", "job_id": "12345"}
+
+    asyncio.run(run())
+
+
+def test_textual_relaunch_form_blocks_active_run_confirmation(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 36)) as pilot:
+            await app.push_screen(RelaunchFormScreen(_experiments()[0]))
+            await pilot.pause(0.1)
+            actions = app.screen.query_one("#relaunch-actions")
+            assert [child.id for child in actions.children] == ["back"]
+
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            assert _pending_commands(tmp_path) == []
 
     asyncio.run(run())
 

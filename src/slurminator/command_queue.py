@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -50,6 +51,7 @@ def default_command_handlers() -> dict[str, CommandHandler]:
     return {
         "cancel_run": handle_cancel_run,
         "cancel_all": handle_cancel_all,
+        "relaunch_run": handle_relaunch_run,
         "pause_submissions": handle_pause_submissions,
         "resume_submissions": handle_resume_submissions,
         "set_concurrency_limit": handle_set_concurrency_limit,
@@ -119,6 +121,37 @@ def handle_cancel_all(cmd: Command, ctx: CommandQueueContext) -> None:
         scancel_via_connection(ctx.connection_manager, hpc_type, str(job_id))
 
 
+def handle_relaunch_run(cmd: Command, ctx: CommandQueueContext) -> None:
+    """Reset one terminal experiment so the next poll can submit it again."""
+    exp = _find_experiment(ctx, cmd.target.get("experiment_id"))
+    if exp is None:
+        raise ValueError(f"unknown experiment_id: {cmd.target.get('experiment_id')!r}")
+
+    expected_job_id = cmd.target.get("job_id")
+    current_job_id = exp.get("job_id")
+    if expected_job_id is not None and current_job_id is not None and str(expected_job_id) != str(current_job_id):
+        raise ValueError(
+            f"stale relaunch command for {exp.get('experiment_id')!r}: "
+            f"expected job_id {expected_job_id!r}, found {current_job_id!r}"
+        )
+
+    status = _coerce_status(exp.get("status"))
+    if status is None or status not in _RELAUNCHABLE_STATUSES:
+        raise ValueError(f"cannot relaunch experiment {exp.get('experiment_id')!r} from status {exp.get('status')!r}")
+
+    previous_status = status.value
+    previous_job_id = exp.get("job_id")
+    exp["status"] = ExperimentStatus.PENDING
+    exp["manual_relaunch_count"] = int(exp.get("manual_relaunch_count", 0) or 0) + 1
+    exp["relaunch_requested_at"] = time.time()
+    exp["relaunch_previous_status"] = previous_status
+    if previous_job_id is not None:
+        exp["relaunch_source_job_id"] = str(previous_job_id)
+
+    for key in _RELAUNCH_RESET_FIELDS:
+        exp.pop(key, None)
+
+
 def handle_pause_submissions(cmd: Command, ctx: CommandQueueContext) -> None:
     """Pause new job submission for the current orchestrator session."""
     ctx.orchestrator.submissions_paused = True
@@ -155,15 +188,23 @@ def _find_experiment(ctx: CommandQueueContext, experiment_id: object) -> dict[st
 
 
 def _status_in(status: object, allowed: set[ExperimentStatus]) -> bool:
-    if not isinstance(status, ExperimentStatus):
+    coerced = _coerce_status(status)
+    return coerced in allowed if coerced is not None else False
+
+
+def _coerce_status(status: object) -> ExperimentStatus | None:
+    if isinstance(status, ExperimentStatus):
+        return status
+    text = str(status).strip()
+    if text.startswith("ExperimentStatus."):
+        text = text.split(".", 1)[1]
+    try:
+        return ExperimentStatus(text)
+    except ValueError:
         try:
-            status = ExperimentStatus(str(status))
-        except ValueError:
-            try:
-                status = ExperimentStatus[str(status).upper()]
-            except KeyError:
-                return False
-    return status in allowed
+            return ExperimentStatus[text.upper()]
+        except KeyError:
+            return None
 
 
 def _coerce_hpc(value: object) -> HPCType | None:
@@ -223,9 +264,39 @@ __all__ = [
     "default_command_handlers",
     "handle_cancel_all",
     "handle_cancel_run",
+    "handle_relaunch_run",
     "handle_pause_submissions",
     "handle_resume_submissions",
     "handle_set_concurrency_limit",
     "process_command_queue",
     "scancel_via_connection",
 ]
+
+
+_RELAUNCHABLE_STATUSES = {
+    ExperimentStatus.COMPLETED,
+    ExperimentStatus.FAILED,
+    ExperimentStatus.CANCELLED,
+    ExperimentStatus.TIMEOUT,
+    ExperimentStatus.OOM,
+    ExperimentStatus.KILLED,
+}
+
+_RELAUNCH_RESET_FIELDS = {
+    "job_id",
+    "queued_timestamp",
+    "running_timestamp",
+    "completed_timestamp",
+    "failed_timestamp",
+    "cancelled_timestamp",
+    "timeout_timestamp",
+    "killed_timestamp",
+    "output_dir",
+    "sacct_snapshot",
+    "scheduler_state",
+    "slurm_state",
+    "history",
+    "history_last_read_offset",
+    "history_truncated",
+    "history_attempt_max",
+}
