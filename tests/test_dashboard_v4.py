@@ -12,11 +12,14 @@ from pathlib import Path
 import pytest
 from rich.text import Text
 from textual import events
+from textual.widgets import Label
 
+from slurminator.command_queue import Command
 from slurminator.config import HPCType
 from slurminator.dashboard_v4.app import TextualDashboardApp, suppress_thread_signal_registration
 from slurminator.dashboard_v4.commands import submit_command
 from slurminator.dashboard_v4.detail_screen import PerRunDetailScreen
+from slurminator.dashboard_v4.global_menu import GlobalMenuScreen
 from slurminator.dashboard_v4.log_screen import PerRunLogScreen
 from slurminator.dashboard_v4.per_run_menu import PerRunMenuScreen
 from slurminator.dashboard_v4.plot_screen import PerRunPlotScreen
@@ -105,6 +108,11 @@ def _has_styled_span(text: Text, substring: str, style: str) -> bool:
     start = text.plain.index(substring)
     end = start + len(substring)
     return any(span.start <= start and span.end >= end and str(span.style) == style for span in text.spans)
+
+
+def _pending_commands(root: Path) -> list[Command]:
+    pending = root / ".orchestrator_status" / "_commands" / "pending"
+    return [Command.model_validate_json(path.read_text(encoding="utf-8")) for path in sorted(pending.glob("*.json"))]
 
 
 def _experiments() -> list[dict]:
@@ -302,6 +310,96 @@ def test_textual_home_table_renders_sparkline_and_toggles_column(tmp_path: Path)
             await pilot.pause(0.1)
             assert app.sparkline_enabled is True
             assert len(table.get_row_at(0)) == 9
+
+    asyncio.run(run())
+
+
+def test_textual_global_menu_opens_and_escape_closes(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        orch._publish_dashboard_snapshot(_experiments())
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("g")
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, GlobalMenuScreen)
+            assert app.screen.query_one("#global-actions").children[0].id == "toggle-submissions"
+
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            assert not isinstance(app.screen, GlobalMenuScreen)
+
+    asyncio.run(run())
+
+
+def test_textual_global_menu_pause_and_resume_commands_are_observed(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        exps = _experiments()
+        orch._publish_dashboard_snapshot(exps)
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("g")
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            assert orch._process_command_queue(exps) == 1
+            assert orch.submissions_paused is True
+
+            await pilot.press("g")
+            await pilot.pause(0.1)
+            actions = app.screen.query_one("#global-actions")
+            assert actions.children[0].query_one(Label).content == "Resume submissions"
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            assert orch._process_command_queue(exps) == 1
+            assert orch.submissions_paused is False
+
+    asyncio.run(run())
+
+
+def test_textual_global_menu_cancel_all_writes_command(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        orch._publish_dashboard_snapshot(_experiments())
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("g")
+            await pilot.press("down")
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            commands = _pending_commands(tmp_path)
+            assert len(commands) == 1
+            assert commands[0].action == "cancel_all"
+            assert commands[0].target == {"scope": "session"}
+
+    asyncio.run(run())
+
+
+def test_textual_global_menu_opens_from_per_run_menu(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        orch._publish_dashboard_snapshot(_experiments())
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, PerRunMenuScreen)
+
+            await pilot.press("g")
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, GlobalMenuScreen)
 
     asyncio.run(run())
 

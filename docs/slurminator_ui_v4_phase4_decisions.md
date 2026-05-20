@@ -115,6 +115,22 @@ spec left room for implementation detail.
   modal screen could close or ignore the UI without the orchestrator loop seeing
   a graceful shutdown request.
 
+## Slice 8: Global Menu
+
+- No formal Slice 8 contract file is present in this checkout. This pass was
+  scoped from the Phase 4 sequence notes: add the `g` shortcut and a
+  `GlobalMenuScreen` for dashboard-wide actions.
+- The global menu is available from the home screen and from per-run plot,
+  detail, log, and menu screens. `Esc` closes the menu and `q` keeps its global
+  graceful shutdown behavior.
+- Initial global actions are command-queue-backed `pause_submissions`,
+  `resume_submissions`, and `cancel_all`. Concurrency limit editing is kept out
+  of this slice because the earlier plan calls out a dedicated concurrency modal
+  in Slice 11.
+- `cancel_all` submits the existing command action with `{"scope": "session"}`.
+  The existing command handler only cancels queued/running jobs, so terminal
+  runs are not touched.
+
 ## Known Terminal Compatibility
 
 ### tmux + TERM requirement

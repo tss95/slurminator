@@ -96,6 +96,20 @@ class TextualDashboardApp(App[None]):
         margin-bottom: 1;
     }
 
+    #global-menu {
+        width: 52;
+        height: auto;
+        max-height: 14;
+        border: solid $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #global-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
     PerRunPlotScreen {
         layout: vertical;
     }
@@ -220,6 +234,14 @@ class TextualDashboardApp(App[None]):
     def action_quit(self) -> None:
         """Handle global quit from any v4 screen."""
         self.request_dashboard_exit()
+
+    def action_global_menu(self) -> None:
+        """Open the global action menu."""
+        from slurminator.dashboard_v4.global_menu import GlobalMenuScreen
+
+        if isinstance(self.screen, GlobalMenuScreen):
+            return
+        self.push_screen(GlobalMenuScreen())
 
     def _attach_orchestrator(self, orchestrator: Any) -> None:
         self.orchestrator = orchestrator
