@@ -399,6 +399,10 @@ class HPCOrchestrator:
                         self._publish_dashboard_snapshot(exps)
                         live.update(dash.render(exps))
 
+                        if self._dashboard_requested_exit(dash):
+                            logger.info("Dashboard requested orchestrator exit.")
+                            break
+
                         if self._all_done(exps):
                             logger.info("All experiments terminal => exiting orchestrator.")
                             # Ensure display metrics are populated for final render
@@ -407,7 +411,9 @@ class HPCOrchestrator:
                             live.update(dash.render(exps))
                             break
 
-                        time.sleep(self.poll_interval)
+                        if self._sleep_until_next_poll(dash):
+                            logger.info("Dashboard requested orchestrator exit.")
+                            break
 
         except KeyboardInterrupt:
             logger.info("User interrupted HPC Orchestrator.")
@@ -433,6 +439,22 @@ class HPCOrchestrator:
     def _publish_dashboard_snapshot(self, exps: list[dict[str, Any]]) -> None:
         """Publish a copy of the latest ledger for threaded dashboard readers."""
         self._dashboard_snapshot = copy.deepcopy(exps)
+
+    @staticmethod
+    def _dashboard_requested_exit(dashboard: Any) -> bool:
+        """Return True when a dashboard requested the orchestrator loop to stop."""
+        return bool(getattr(dashboard, "dashboard_exit_requested", False))
+
+    def _sleep_until_next_poll(self, dashboard: Any) -> bool:
+        """Sleep until the next poll, waking early for dashboard exit requests."""
+        deadline = time.monotonic() + max(float(self.poll_interval), 0.0)
+        while True:
+            if self._dashboard_requested_exit(dashboard):
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                return self._dashboard_requested_exit(dashboard)
+            time.sleep(min(remaining, 0.2))
 
     # -------------------------------------------------------------------------
     # Preflight checks

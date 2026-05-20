@@ -56,8 +56,10 @@ made where the spec left room for implementation detail.
 - The v4 dashboard uses the threaded integration model from the spec. The
   synchronous orchestrator loop continues to poll; after each poll it publishes a
   deep-copied `_dashboard_snapshot` for the Textual app.
-- Pressing `q` exits the Textual dashboard only. The orchestrator keeps running
-  headless after the dashboard closes.
+- Pressing `q` requests a graceful orchestrator shutdown. Earlier Slice 4
+  implementation exited only the Textual dashboard and left Slurminator running
+  headless; live use showed that this was surprising because users still had to
+  press Ctrl+C to terminate the process.
 - E.1 future modules are present as inert placeholders so later slices can fill
   them without changing package layout.
 - The Slice 4 quota footer is a lightweight skeleton showing submission state,

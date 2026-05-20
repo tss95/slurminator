@@ -670,3 +670,22 @@ def test_textual_q_requests_dashboard_exit(tmp_path: Path) -> None:
             assert app.dashboard_exit_requested is True
 
     asyncio.run(run())
+
+
+def test_orchestrator_poll_sleep_wakes_when_dashboard_requests_exit(tmp_path: Path) -> None:
+    class Dashboard:
+        dashboard_exit_requested = False
+
+    orch = _orchestrator(tmp_path)
+    orch.poll_interval = 10
+    dashboard = Dashboard()
+    timer = threading.Timer(0.05, lambda: setattr(dashboard, "dashboard_exit_requested", True))
+
+    start = time.monotonic()
+    timer.start()
+    try:
+        assert orch._sleep_until_next_poll(dashboard) is True
+    finally:
+        timer.cancel()
+
+    assert time.monotonic() - start < 1.0
