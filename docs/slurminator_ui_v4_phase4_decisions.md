@@ -82,3 +82,35 @@ made where the spec left room for implementation detail.
   present and defaults to higher-is-better when unknown.
 - Multi-run overlays, attempt filtering/coloring, detail screens, and log
   screens remain out of scope for Slice 5.
+
+## Known Terminal Compatibility
+
+### tmux + TERM requirement
+
+The Textual dashboard requires `tmux-256color` (preferred) or at minimum
+`xterm-256color` to receive resize events and render correctly. The legacy
+`screen-256color` default that ships with most tmux installations causes the v4
+dashboard to skip resize handling. Users running tmux must add the following to
+`~/.tmux.conf`:
+
+```tmux
+set-option -g default-terminal "tmux-256color"
+set-option -ga terminal-overrides ",xterm-256color:RGB"
+```
+
+After updating, restart tmux (`tmux kill-server && tmux`) or export
+`TERM=tmux-256color` inside the existing session before launching the
+dashboard. Verify with `echo $TERM`; it must show `tmux-256color` or
+`xterm-256color`, not `screen-256color`.
+
+### Outer terminal compatibility
+
+On Windows, use Windows Terminal or another modern terminal emulator such as
+WezTerm rather than the legacy `powershell.exe` console host. The legacy host
+does not reliably propagate `SIGWINCH` through SSH, which prevents resize
+events from reaching the remote tmux + Textual stack regardless of TERM
+configuration.
+
+If `tmux-256color` is unavailable on the remote system, which is rare but
+possible on older clusters, users can install it locally with `tic`. See the
+Textual terminal support documentation for the workaround.

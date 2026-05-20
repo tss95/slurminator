@@ -75,8 +75,10 @@ Install the optional Textual dashboard v4 dependencies:
 python -m pip install -e "../slurminator[v4]"
 ```
 
-When running dashboard v4 inside tmux, use a 256-color terminal setting such as
-`set -g default-terminal "tmux-256color"` in your tmux config.
+Dashboard v4 requires a modern terminal configuration. When running inside
+tmux, use `tmux-256color` or `xterm-256color`, not the legacy
+`screen-256color` default. See the
+[Dashboard v4 requirements](#dashboard-v4-requirements) section for details.
 
 Install from GitHub:
 
@@ -441,11 +443,33 @@ charging rules such as partition multipliers, full-node charging, or minimum GPU
 counts per node. Treat the quota footer as an early warning and sanity check,
 not as an authoritative accounting statement.
 
+## Dashboard v4
+
 Dashboard v4 is an optional Textual interface. Install it with
 `pip install "slurminator[v4]"`, then launch with `--dashboard-ui v4`. The
 default `--dashboard-ui v3` remains Rich-based and does not require Textual.
 Phase 4 implementation decisions are tracked in
 [`docs/slurminator_ui_v4_phase4_decisions.md`](docs/slurminator_ui_v4_phase4_decisions.md).
+
+### Dashboard v4 Requirements
+
+If you run v4 inside tmux, configure tmux to use `tmux-256color`:
+
+```tmux
+set-option -g default-terminal "tmux-256color"
+set-option -ga terminal-overrides ",xterm-256color:RGB"
+```
+
+Restart tmux with `tmux kill-server && tmux`, or export `TERM=tmux-256color`
+inside the current tmux session before launching the dashboard. Verify with
+`echo $TERM`; it should not be `screen-256color`.
+
+On Windows, use Windows Terminal or another modern terminal emulator such as
+WezTerm rather than the legacy `powershell.exe` console host, which may not
+propagate resize events through SSH reliably. See
+[`docs/slurminator_ui_v4_phase4_decisions.md#known-terminal-compatibility`](docs/slurminator_ui_v4_phase4_decisions.md#known-terminal-compatibility)
+for the full compatibility notes and the `tic` workaround for older systems
+without `tmux-256color` terminfo.
 
 ## Development
 

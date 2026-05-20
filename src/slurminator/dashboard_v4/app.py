@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 import signal
 import sys
 import threading
@@ -130,6 +131,7 @@ class TextualDashboardApp(App[None]):
         super().__init__(**kwargs)
         if LinuxDriver is not None and self.driver_class is LinuxDriver:
             self.driver_class = ThreadFriendlyLinuxDriver
+        warn_if_incompatible_term()
         self.n_recent = n_recent
         self.refresh_interval = refresh_interval
         self.ui_version = ui_version
@@ -142,10 +144,12 @@ class TextualDashboardApp(App[None]):
         self._snapshot_lock = threading.Lock()
         self._run_thread: threading.Thread | None = None
         self._run_error: BaseException | None = None
+        self._last_terminal_size: os.terminal_size | None = None
 
     def on_mount(self) -> None:
         """Install the home screen when Textual starts."""
         self.push_screen(HomeScreen())
+        self.set_interval(2.0, self._poll_terminal_size)
 
     def mount(self, *widgets: Any, before: int | str | Widget | None = None, after: int | str | Widget | None = None):
         """Support both Textual widget mounting and Slurminator dashboard mounting."""
@@ -226,6 +230,17 @@ class TextualDashboardApp(App[None]):
         if self._run_thread is not None:
             self._run_thread.join(timeout=2.0)
 
+    def _poll_terminal_size(self) -> None:
+        """Refresh layout when resize signals are not delivered."""
+        try:
+            size = os.get_terminal_size()
+        except OSError:
+            return
+        if size == self._last_terminal_size:
+            return
+        self._last_terminal_size = size
+        self.refresh(layout=True)
+
 
 class _TextualDashboardSession(AbstractContextManager[TextualDashboardApp]):
     """Context manager returned by ``TextualDashboardApp.mount(orchestrator)``."""
@@ -299,6 +314,18 @@ def _is_console_stream_handler(handler: logging.Handler) -> bool:
         return False
     stream = getattr(handler, "stream", None)
     return stream in {sys.stdout, sys.stderr, sys.__stdout__, sys.__stderr__}
+
+
+def warn_if_incompatible_term() -> None:
+    """Log a hint for tmux TERM values known to break Textual resize handling."""
+    current_term = os.environ.get("TERM", "")
+    if current_term in ("screen-256color", "screen", "") or current_term.startswith("screen-"):
+        logger.warning(
+            "Detected TERM=%r. The v4 dashboard requires tmux-256color or "
+            "xterm-256color for correct resize handling. See "
+            "docs/slurminator_ui_v4_phase4_decisions.md for setup instructions.",
+            current_term or "<unset>",
+        )
 
 
 __all__ = ["TextualDashboardApp"]

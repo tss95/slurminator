@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import re
 import signal
 import shlex
@@ -255,6 +256,45 @@ def test_textual_dashboard_mount_quiets_console_logs(tmp_path: Path) -> None:
     finally:
         logger.removeHandler(handler)
         logger.setLevel(previous_level)
+
+
+def test_textual_dashboard_warns_for_screen_term(monkeypatch, caplog) -> None:
+    monkeypatch.setenv("TERM", "screen-256color")
+    caplog.set_level(logging.WARNING, logger="slurminator")
+
+    TextualDashboardApp(refresh_interval=0.05)
+
+    assert "Detected TERM='screen-256color'" in caplog.text
+    assert "tmux-256color or xterm-256color" in caplog.text
+    assert "docs/slurminator_ui_v4_phase4_decisions.md" in caplog.text
+
+
+def test_textual_dashboard_does_not_warn_for_tmux_term(monkeypatch, caplog) -> None:
+    monkeypatch.setenv("TERM", "tmux-256color")
+    caplog.set_level(logging.WARNING, logger="slurminator")
+
+    TextualDashboardApp(refresh_interval=0.05)
+
+    assert "Detected TERM=" not in caplog.text
+
+
+def test_textual_terminal_size_poll_refreshes_only_on_change(monkeypatch) -> None:
+    monkeypatch.setenv("TERM", "tmux-256color")
+    app = TextualDashboardApp(refresh_interval=0.05)
+    refresh_calls: list[dict[str, object]] = []
+
+    def fake_refresh(*args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        refresh_calls.append(dict(kwargs))
+
+    monkeypatch.setattr(app, "refresh", fake_refresh)
+    monkeypatch.setattr(os, "get_terminal_size", lambda: os.terminal_size((100, 40)))
+    app._poll_terminal_size()
+    app._poll_terminal_size()
+    assert refresh_calls == [{"layout": True}]
+
+    monkeypatch.setattr(os, "get_terminal_size", lambda: os.terminal_size((120, 50)))
+    app._poll_terminal_size()
+    assert refresh_calls == [{"layout": True}, {"layout": True}]
 
 
 def test_textual_thread_signal_registration_is_ignored() -> None:
