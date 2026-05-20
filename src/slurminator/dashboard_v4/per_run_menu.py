@@ -39,9 +39,10 @@ class PerRunMenuScreen(ModalScreen[None]):
                 ListItem(Label("View plots"), id="view-plots"),
                 ListItem(Label("View details"), id="view-details"),
                 ListItem(Label("View log tail"), id="view-log-tail"),
-                ListItem(Label("Cancel run"), id="cancel-run"),
+                ListItem(Label("Cancel selected run"), id="cancel-run"),
                 ListItem(Label("Relaunch"), id="relaunch-run"),
                 ListItem(Label("Settings"), id="settings"),
+                ListItem(Label("Return"), id="return"),
                 id="per-run-actions",
             ),
             id="per-run-menu",
@@ -63,6 +64,8 @@ class PerRunMenuScreen(ModalScreen[None]):
             self.app.pop_screen()
         elif event.item.id == "relaunch-run":
             self.app.push_screen(RelaunchFormScreen(self.exp))
+        elif event.item.id == "return":
+            self.app.pop_screen()
 
 
 __all__ = ["PerRunMenuScreen"]

@@ -140,12 +140,15 @@ spec left room for implementation detail.
 - No formal Slice 9 contract file is present in this checkout. This pass was
   scoped from the Phase 4 sequence notes and existing placeholders:
   per-run actions for cancelling an active run and relaunching a terminal run.
-- `Cancel run` writes the existing `cancel_run` command queue action. The
-  existing handler only issues `scancel` when the run is still queued/running.
+- `Cancel selected run` writes the existing `cancel_run` command queue action.
+  The existing handler only issues `scancel` when the run is still
+  queued/running.
 - `Relaunch` opens a confirmation modal and writes a new `relaunch_run` command.
   The command handler refuses queued/running/pending runs to avoid duplicate
   active jobs; users should cancel active jobs first, then relaunch after the
   scheduler marks them terminal.
+- `Return` is present as an explicit non-destructive menu item for leaving the
+  per-run menu; `Esc` remains available as a shortcut.
 - A relaunch resets the selected terminal experiment to `PENDING`, clears stale
   job/log/history fields, keeps the experiment assignment and sweep parameters,
   and records lightweight audit fields (`manual_relaunch_count`,

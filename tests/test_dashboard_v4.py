@@ -575,6 +575,37 @@ def test_textual_enter_opens_placeholder_modal_and_escape_closes(tmp_path: Path)
     asyncio.run(run())
 
 
+def test_textual_per_run_menu_labels_cancel_and_return_actions(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 36)) as pilot:
+            await app.push_screen(PerRunMenuScreen(_experiments()[0]))
+            await pilot.pause(0.1)
+            actions = app.screen.query_one("#per-run-actions")
+            assert [child.id for child in actions.children] == [
+                "view-plots",
+                "view-details",
+                "view-log-tail",
+                "cancel-run",
+                "relaunch-run",
+                "settings",
+                "return",
+            ]
+            assert actions.children[3].query_one(Label).content == "Cancel selected run"
+            assert actions.children[-1].query_one(Label).content == "Return"
+
+            actions.index = 6
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            assert not isinstance(app.screen, PerRunMenuScreen)
+            assert _pending_commands(tmp_path) == []
+
+    asyncio.run(run())
+
+
 def test_textual_per_run_menu_opens_plot_screen_for_selected_run(tmp_path: Path) -> None:
     async def run() -> None:
         orch = _orchestrator(tmp_path)
