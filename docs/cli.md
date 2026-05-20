@@ -67,7 +67,8 @@ Partition overrides:
 ## Runtime Behavior
 
 - `--poll-interval SECONDS`: scheduler polling interval. Default: `2`.
-- `--dashboard-ui v2|v3`: dashboard implementation. Default: `v3`.
+- `--dashboard-ui v2|v3|v4`: dashboard implementation. Default: `v3`.
+  Dashboard v4 requires the optional `slurminator[v4]` dependency.
 - `--dry-run`: generate and validate inputs, then exit without launching jobs.
 - `--debug`: enable debug mode.
 - `--no-prog`: reserved compatibility flag; currently ignored by the generic

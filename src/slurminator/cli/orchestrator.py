@@ -92,7 +92,11 @@ def build_base_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--poll-interval", type=int, default=2, help="Polling interval in seconds.")
     parser.add_argument(
-        "--dashboard-ui", dest="dashboard_ui", choices=["v2", "v3"], default="v3", help="Select dashboard UI version."
+        "--dashboard-ui",
+        dest="dashboard_ui",
+        choices=["v2", "v3", "v4"],
+        default="v3",
+        help="Select dashboard UI version.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Generate/validate and exit without launching jobs.")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode.")

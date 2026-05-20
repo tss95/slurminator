@@ -1,3 +1,4 @@
+import copy
 import logging
 import os
 import time
@@ -104,6 +105,7 @@ class HPCOrchestrator:
 
         self.concurrency_limits = concurrency_limits or {}
         self.submissions_paused = False
+        self._dashboard_snapshot: list[dict[str, Any]] = []
         self.state_store = ExperimentStateStore(self.experiment_file, self.concurrency_limits)
         self.poll_interval = poll_interval
         self.max_unqueue_seconds = max_unqueue_seconds
@@ -351,6 +353,7 @@ class HPCOrchestrator:
 
                     data["experiments"] = exps
                     self._save_yaml(data)
+                    self._publish_dashboard_snapshot(exps)
 
                     print_overview(exps)
 
@@ -360,14 +363,8 @@ class HPCOrchestrator:
 
                     time.sleep(self.poll_interval)
             else:
-                # Import here to avoid mandatory Rich dependency when --debug
-                # is enabled (text-only mode) or during unit testing.
-                if self.dashboard_cls is None:
-                    from slurminator.ui_dashboard import TerminalDashboard
-                else:
-                    TerminalDashboard = self.dashboard_cls
-
-                dash = TerminalDashboard(n_recent=0, ui_version=self.dashboard_ui)
+                DashboardCls = self._resolve_dashboard_cls()
+                dash = DashboardCls(n_recent=0, ui_version=self.dashboard_ui)
 
                 with dash.mount(self) as live:
                     while True:
@@ -393,12 +390,14 @@ class HPCOrchestrator:
 
                         # Ensure all experiments have display metrics populated before rendering
                         populate_display_metrics(exps)
+                        self._publish_dashboard_snapshot(exps)
                         live.update(dash.render(exps))
 
                         if self._all_done(exps):
                             logger.info("All experiments terminal => exiting orchestrator.")
                             # Ensure display metrics are populated for final render
                             populate_display_metrics(exps)
+                            self._publish_dashboard_snapshot(exps)
                             live.update(dash.render(exps))
                             break
 
@@ -412,6 +411,22 @@ class HPCOrchestrator:
         finally:
             logger.info("Closing HPC connections.")
             self.connection_manager.close_all()
+
+    def _resolve_dashboard_cls(self):
+        """Resolve the concrete dashboard class for the requested UI version."""
+        if self.dashboard_cls is not None:
+            return self.dashboard_cls
+        if str(self.dashboard_ui).strip().lower() == "v4":
+            from slurminator.dashboard_v4.app import TextualDashboardApp
+
+            return TextualDashboardApp
+        from slurminator.ui_dashboard import TerminalDashboard
+
+        return TerminalDashboard
+
+    def _publish_dashboard_snapshot(self, exps: list[dict[str, Any]]) -> None:
+        """Publish a copy of the latest ledger for threaded dashboard readers."""
+        self._dashboard_snapshot = copy.deepcopy(exps)
 
     # -------------------------------------------------------------------------
     # Preflight checks
@@ -733,6 +748,8 @@ class HPCOrchestrator:
     def _command_queue_save_paths(self, exps: list[dict[str, Any]]) -> list[Path]:
         """Return local command-queue roots, preferring configured SAVE_PATH values."""
         paths: list[Path] = []
+        paths.append(self.experiment_dir)
+
         env_save_path = os.getenv("SAVE_PATH")
         if env_save_path:
             paths.append(Path(env_save_path))
@@ -748,9 +765,6 @@ class HPCOrchestrator:
             save_path = getattr(cluster_config, "save_path", None) if cluster_config else None
             if save_path:
                 paths.append(Path(str(save_path)))
-
-        if not paths:
-            paths.append(self.experiment_dir)
 
         deduped: list[Path] = []
         seen: set[str] = set()

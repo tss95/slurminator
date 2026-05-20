@@ -69,6 +69,15 @@ Editable install from a sibling checkout:
 python -m pip install -e ../slurminator
 ```
 
+Install the optional Textual dashboard v4 dependencies:
+
+```bash
+python -m pip install -e "../slurminator[v4]"
+```
+
+When running dashboard v4 inside tmux, use a 256-color terminal setting such as
+`set -g default-terminal "tmux-256color"` in your tmux config.
+
 Install from GitHub:
 
 ```bash
@@ -431,6 +440,10 @@ from literal requested walltime and GPU counts; it does not model site-specific
 charging rules such as partition multipliers, full-node charging, or minimum GPU
 counts per node. Treat the quota footer as an early warning and sanity check,
 not as an authoritative accounting statement.
+
+Dashboard v4 is an optional Textual interface. Install it with
+`pip install "slurminator[v4]"`, then launch with `--dashboard-ui v4`. The
+default `--dashboard-ui v3` remains Rich-based and does not require Textual.
 
 ## Development
 
