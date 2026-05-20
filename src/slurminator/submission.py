@@ -14,6 +14,7 @@ from typing import Any
 from slurminator.experiments import ExperimentStatus
 from slurminator.config import HPCType
 from slurminator.experiment_policy import resolve_pinned_hpc, resolve_resource_overrides, resolve_sbatch_export_vars
+from slurminator.git_provenance import capture_provenance
 from slurminator.timeout_policy import SubmissionResources, apply_timeout_retry_to_resources
 
 logger = logging.getLogger("slurminator")
@@ -82,6 +83,7 @@ def maybe_submit(
         return
 
     logger.info("Submitting %s => HPC=%s, usage=%s/%s", exp["experiment_id"], hpc_type, used, limit)
+    exp["git_sha_at_submission"] = capture_provenance()
     job_id = submit_experiment(exp, hpc_type)
     if not job_id:
         return

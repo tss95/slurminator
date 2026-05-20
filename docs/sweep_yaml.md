@@ -19,6 +19,9 @@ an existing experiment list.
 The minimum runnable state file is:
 
 ```yaml
+metadata:
+  project_git_sha: null
+  slurminator_git_sha: null
 experiments:
   - experiment_id: smoke_001
     status: pending
@@ -59,6 +62,15 @@ This is the simplest way to run several independent canaries under one
 dashboard. The orchestrator treats every row independently and uses
 `experiment_id` as the stable row key.
 
+Generated experiment-state YAML includes provenance metadata for reproducible
+launches. `metadata.project_git_sha` records the project repository `HEAD` when
+the ledger was created, and `metadata.slurminator_git_sha` records the
+Slurminator repository `HEAD`. Either field may be `null` when the corresponding
+directory is not a git checkout, `git` is unavailable, or SHA capture otherwise
+fails. On submission, each row gains `git_sha_at_submission` with `project` and
+`slurminator` subkeys so resumed or relaunched rows can record the code state
+active for that specific submission.
+
 Each row is one schedulable job. Slurminator owns the scheduler fields and may
 rewrite them while running:
 
@@ -70,6 +82,8 @@ rewrite them while running:
   timestamps when available.
 - `output_dir`, `save_path`, `requested_time_hours`, `requested_ram_gb`,
   `requested_gpu_count`: resolved runtime details.
+- `git_sha_at_submission`: best-effort project and Slurminator git SHAs captured
+  just before submission.
 - `metrics`, `display_metric_info`, `links`, and progress fields populated from
   status callbacks.
 
