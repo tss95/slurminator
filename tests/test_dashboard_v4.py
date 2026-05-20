@@ -229,7 +229,7 @@ def test_textual_home_table_uses_status_colors_metric_colors_and_v3_order(tmp_pa
     async def run() -> None:
         orch = _orchestrator(tmp_path)
         exps = _experiments()
-        exps[0]["display_metric_info"]["loss"]["threshold"] = 1.0
+        exps[0]["display_metric_info"]["loss"].update({"shortform": "vloss", "threshold": 1.0})
         completed = dict(exps[1])
         completed.update(
             {
@@ -237,7 +237,7 @@ def test_textual_home_table_uses_status_colors_metric_colors_and_v3_order(tmp_pa
                 "status": ExperimentStatus.COMPLETED,
                 "target_metric_name": "acc",
                 "target_metric_value": 0.9,
-                "display_metric_info": {"acc": {"higher_better": True, "threshold": 0.5}},
+                "display_metric_info": {"acc": {"shortform": "vacc", "higher_better": True, "threshold": 0.5}},
             }
         )
         orch._publish_dashboard_snapshot([exps[1], completed, exps[0]])
@@ -254,9 +254,10 @@ def test_textual_home_table_uses_status_colors_metric_colors_and_v3_order(tmp_pa
             assert status_cell.plain == "RUNNING"
             assert status_cell.style == "green"
             assert isinstance(primary_cell, Text)
-            assert primary_cell.plain == "loss=0.5000"
+            assert primary_cell.plain == "0.5000"
             assert primary_cell.style == "green"
             assert table.get_row_at(0)[4] == "1/4  25.0%"
+            assert str(list(table.columns.values())[5].label) == "vloss"
 
     asyncio.run(run())
 
@@ -740,6 +741,28 @@ def test_textual_q_requests_dashboard_exit(tmp_path: Path) -> None:
             await pilot.press("q")
             await pilot.pause(0.05)
             assert app.dashboard_exit_requested is True
+            assert orch._dashboard_exit_requested is True
+
+    asyncio.run(run())
+
+
+def test_textual_q_requests_dashboard_exit_from_modal(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        orch._publish_dashboard_snapshot(_experiments())
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, PerRunMenuScreen)
+
+            await pilot.press("q")
+            await pilot.pause(0.05)
+            assert app.dashboard_exit_requested is True
+            assert orch._dashboard_exit_requested is True
 
     asyncio.run(run())
 
@@ -752,6 +775,25 @@ def test_orchestrator_poll_sleep_wakes_when_dashboard_requests_exit(tmp_path: Pa
     orch.poll_interval = 10
     dashboard = Dashboard()
     timer = threading.Timer(0.05, lambda: setattr(dashboard, "dashboard_exit_requested", True))
+
+    start = time.monotonic()
+    timer.start()
+    try:
+        assert orch._sleep_until_next_poll(dashboard) is True
+    finally:
+        timer.cancel()
+
+    assert time.monotonic() - start < 1.0
+
+
+def test_orchestrator_poll_sleep_wakes_when_orchestrator_exit_flag_is_set(tmp_path: Path) -> None:
+    class Dashboard:
+        dashboard_exit_requested = False
+
+    orch = _orchestrator(tmp_path)
+    orch.poll_interval = 10
+    dashboard = Dashboard()
+    timer = threading.Timer(0.05, lambda: setattr(orch, "_dashboard_exit_requested", True))
 
     start = time.monotonic()
     timer.start()

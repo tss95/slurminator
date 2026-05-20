@@ -107,6 +107,7 @@ class HPCOrchestrator:
 
         self.concurrency_limits = concurrency_limits or {}
         self.submissions_paused = False
+        self._dashboard_exit_requested = False
         self._dashboard_snapshot: list[dict[str, Any]] = []
         self.state_store = ExperimentStateStore(self.experiment_file, self.concurrency_limits)
         self.poll_interval = poll_interval
@@ -378,10 +379,16 @@ class HPCOrchestrator:
                         exps = data["experiments"]
 
                         self._process_command_queue(exps)
+                        if self._dashboard_requested_exit(dash):
+                            logger.info("Dashboard requested orchestrator exit.")
+                            break
                         self._update_statuses(exps)
                         self._update_queue_estimates(exps)
                         data["experiments"] = exps
                         self._save_yaml(data)
+                        if self._dashboard_requested_exit(dash):
+                            logger.info("Dashboard requested orchestrator exit.")
+                            break
 
                         concurrency_used = self._count_concurrency(exps)
 
@@ -440,10 +447,11 @@ class HPCOrchestrator:
         """Publish a copy of the latest ledger for threaded dashboard readers."""
         self._dashboard_snapshot = copy.deepcopy(exps)
 
-    @staticmethod
-    def _dashboard_requested_exit(dashboard: Any) -> bool:
+    def _dashboard_requested_exit(self, dashboard: Any) -> bool:
         """Return True when a dashboard requested the orchestrator loop to stop."""
-        return bool(getattr(dashboard, "dashboard_exit_requested", False))
+        return bool(
+            getattr(self, "_dashboard_exit_requested", False) or getattr(dashboard, "dashboard_exit_requested", False)
+        )
 
     def _sleep_until_next_poll(self, dashboard: Any) -> bool:
         """Sleep until the next poll, waking early for dashboard exit requests."""

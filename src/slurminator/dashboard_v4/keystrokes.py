@@ -12,10 +12,11 @@ HOME_BINDINGS = [
     Binding("escape", "noop", "", show=False),
 ]
 
-PER_RUN_MENU_BINDINGS = [Binding("escape", "app.pop_screen", "Back")]
+PER_RUN_MENU_BINDINGS = [Binding("escape", "app.pop_screen", "Back"), Binding("q", "app.quit", "Quit")]
 
 PLOT_BINDINGS = [
     Binding("escape", "app.pop_screen", "Back"),
+    Binding("q", "app.quit", "Quit"),
     Binding("l", "toggle_log_scale", "Log scale"),
     Binding("b", "toggle_best_overlay", "Best overlay"),
     Binding("up", "metric_up", "Previous metric"),
@@ -24,6 +25,7 @@ PLOT_BINDINGS = [
 
 DETAIL_BINDINGS = [
     Binding("escape", "app.pop_screen", "Back"),
+    Binding("q", "app.quit", "Quit"),
     Binding("r", "refresh", "Refresh"),
     Binding("up", "scroll_up", "Scroll up"),
     Binding("down", "scroll_down", "Scroll down"),
@@ -31,6 +33,7 @@ DETAIL_BINDINGS = [
 
 LOG_BINDINGS = [
     Binding("escape", "app.pop_screen", "Back"),
+    Binding("q", "app.quit", "Quit"),
     Binding("r", "refresh", "Refresh"),
     Binding("up", "scroll_up", "Scroll up"),
     Binding("down", "scroll_down", "Scroll down"),

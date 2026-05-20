@@ -45,6 +45,8 @@ else:  # pragma: no cover - non-Linux defensive
 class TextualDashboardApp(App[None]):
     """Textual dashboard implementing Slurminator's dashboard contract."""
 
+    BINDINGS = [("q", "quit", "Quit")]
+
     CSS = """
     HomeScreen {
         layout: vertical;
@@ -211,7 +213,13 @@ class TextualDashboardApp(App[None]):
     def request_dashboard_exit(self) -> None:
         """Request graceful shutdown of both Textual and the orchestrator loop."""
         self.dashboard_exit_requested = True
+        if self.orchestrator is not None:
+            setattr(self.orchestrator, "_dashboard_exit_requested", True)
         self.exit()
+
+    def action_quit(self) -> None:
+        """Handle global quit from any v4 screen."""
+        self.request_dashboard_exit()
 
     def _attach_orchestrator(self, orchestrator: Any) -> None:
         self.orchestrator = orchestrator

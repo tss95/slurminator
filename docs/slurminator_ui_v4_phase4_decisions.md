@@ -100,12 +100,17 @@ spec left room for implementation detail.
   can be read, v4 shows the provider's unavailable hint rather than hiding the
   footer line.
 - The experiment table now applies v3-style status colors, metric threshold
-  colors, step-first progress formatting, and v3-like row ordering. Selection is
-  preserved by experiment id across refreshes so sorting does not make the
-  cursor jump to a different run.
+  colors, step-first progress formatting, and v3-like row ordering. Metric
+  shortforms belong in the column headers; row cells contain only values.
+  Selection is preserved by experiment id across refreshes so sorting does not
+  make the cursor jump to a different run.
 - The Textual layout gives the footer a fixed three-line area and leaves the
   experiment table as the remaining flexible region, so terminal resizes should
   reallocate table height instead of treating the table as a fixed block.
+- `q` is bound on every v4 screen and sets both the Textual dashboard flag and
+  an orchestrator-side exit flag. This avoids the earlier failure mode where a
+  modal screen could close or ignore the UI without the orchestrator loop seeing
+  a graceful shutdown request.
 
 ## Known Terminal Compatibility
 

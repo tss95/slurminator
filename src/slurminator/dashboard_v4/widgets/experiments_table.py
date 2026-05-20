@@ -27,8 +27,6 @@ FAILED_STATES = {
 class ExperimentsTable(DataTable):
     """Main dashboard table for experiment rows."""
 
-    BASE_COLUMNS = ("ID", "Dataset", "HPC", "State", "Progress", "Primary", "Secondary", "Queue/DT")
-
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._row_experiments: list[dict[str, Any]] = []
@@ -54,7 +52,11 @@ class ExperimentsTable(DataTable):
         rows = _sorted_experiments(experiments)
         cursor_row = _resolve_cursor_row(rows, previous_key, self.cursor_row)
         self.clear(columns=True)
-        self._build_columns(show_sparkline=show_sparkline)
+        self._build_columns(
+            show_sparkline=show_sparkline,
+            primary_label=_metric_column_label(rows, "target_metric_name", "Primary"),
+            secondary_label=_metric_column_label(rows, "secondary_metric_name", "Secondary"),
+        )
         self._row_experiments = rows
         for exp in rows:
             primary_name = exp.get("target_metric_name")
@@ -87,8 +89,10 @@ class ExperimentsTable(DataTable):
         row = min(max(self.cursor_row, 0), len(rows) - 1)
         return rows[row]
 
-    def _build_columns(self, *, show_sparkline: bool = False) -> None:
-        columns = list(self.BASE_COLUMNS)
+    def _build_columns(
+        self, *, show_sparkline: bool = False, primary_label: str = "Primary", secondary_label: str = "Secondary"
+    ) -> None:
+        columns = ["ID", "Dataset", "HPC", "State", "Progress", primary_label, secondary_label, "Queue/DT"]
         if show_sparkline:
             columns.insert(6, "Trajectory")
         self.add_columns(*columns)
@@ -165,33 +169,18 @@ def _format_metric(exp: dict[str, Any], name: object, value: object) -> str | Te
     current = _coerce_float(value)
     best = _lookup_best_metric_value(exp, metric_info)
     if current is None and value is not None:
-        return _format_metric_raw(metric_key, value)
+        return str(value)
     if current is None and best is None:
         return "-"
     style = _metric_color(current, metric_info)
     combined = _format_metric_pair(current, best, metric_info=metric_info)
-    label = _get_metric_label(metric_key, metric_info)
-    text = f"{label}={combined}" if label else combined
-    return Text(text, style=style) if style else text
-
-
-def _format_metric_raw(metric_key: str, value: object) -> str:
-    label = metric_key or "metric"
-    return f"{label}={value}"
+    return Text(combined, style=style) if style else combined
 
 
 def _metric_info_for(exp: dict[str, Any], metric_key: str) -> dict[str, Any] | None:
     metric_info = exp.get("display_metric_info") or exp.get("metric_info") or {}
     info = metric_info.get(metric_key) if isinstance(metric_info, dict) else None
     return info if isinstance(info, dict) else None
-
-
-def _get_metric_label(metric_key: str, metric_info: dict[str, Any] | None) -> str:
-    if not metric_key:
-        return "metric"
-    if isinstance(metric_info, dict):
-        return str(metric_info.get("shortform") or metric_info.get("label") or metric_key)
-    return metric_key
 
 
 def _lookup_best_metric_value(exp: dict[str, Any], metric_info: dict[str, Any] | None) -> float | None:
@@ -285,6 +274,31 @@ def _resolve_cursor_row(rows: list[dict[str, Any]], previous_key: str | None, pr
 
 def _row_key(exp: dict[str, Any], fallback: int) -> str:
     return str(exp.get("experiment_id", fallback))
+
+
+def _metric_column_label(rows: list[dict[str, Any]], metric_name_key: str, fallback: str) -> str:
+    for exp in rows:
+        metric_key = exp.get(metric_name_key)
+        if metric_key:
+            return _metric_header(str(metric_key), _metric_info_for(exp, str(metric_key)))
+    return fallback
+
+
+def _metric_header(metric_key: str, metric_info: dict[str, Any] | None) -> str:
+    shortform = metric_info.get("shortform") if isinstance(metric_info, dict) else None
+    if shortform:
+        return str(shortform)
+    return _abbr_metric(metric_key)
+
+
+def _abbr_metric(metric_key: str | None) -> str:
+    if not metric_key:
+        return "-"
+    name = str(metric_key)
+    if "/" in name:
+        name = name.split("/")[-1]
+    replacements = {"accuracy": "acc", "balanced_accuracy": "bacc", "validation": "val"}
+    return replacements.get(name, name)
 
 
 def _format_sparkline(exp: dict[str, Any], primary_metric: object, *, thresholds: SparklineThresholds | object | None):
