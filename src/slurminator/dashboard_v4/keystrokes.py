@@ -13,4 +13,12 @@ HOME_BINDINGS = [
 
 PER_RUN_MENU_BINDINGS = [Binding("escape", "app.pop_screen", "Back")]
 
-__all__ = ["HOME_BINDINGS", "PER_RUN_MENU_BINDINGS"]
+PLOT_BINDINGS = [
+    Binding("escape", "app.pop_screen", "Back"),
+    Binding("l", "toggle_log_scale", "Log scale"),
+    Binding("b", "toggle_best_overlay", "Best overlay"),
+    Binding("up", "metric_up", "Previous metric"),
+    Binding("down", "metric_down", "Next metric"),
+]
+
+__all__ = ["HOME_BINDINGS", "PER_RUN_MENU_BINDINGS", "PLOT_BINDINGS"]

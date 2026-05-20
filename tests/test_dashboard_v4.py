@@ -1,4 +1,5 @@
 import asyncio
+import re
 import time
 from pathlib import Path
 
@@ -8,27 +9,59 @@ from slurminator.config import HPCType
 from slurminator.dashboard_v4.app import TextualDashboardApp
 from slurminator.dashboard_v4.commands import submit_command
 from slurminator.dashboard_v4.per_run_menu import PerRunMenuScreen
+from slurminator.dashboard_v4.plot_screen import PerRunPlotScreen
 from slurminator.dashboard_v4.widgets import ExperimentsTable
 from slurminator.experiments import ExperimentStatus
 from slurminator.hpc_orchestrator import HPCOrchestrator
+from slurminator.schemas.status_schema import HistoryEntry
 from slurminator.ui_dashboard import TerminalDashboard
 
 pytestmark = pytest.mark.unit
 
 
 class FakeConnection:
-    def run_command(self, _hpc_type, _command, prefer_remote=False):  # noqa: ARG002
+    def __init__(self, history_payload: str = "") -> None:
+        self.history_payload = history_payload
+
+    def run_command(self, _hpc_type, command, prefer_remote=False):  # noqa: ARG002
+        if command.startswith("stat "):
+            return str(len(self.history_payload.encode("utf-8"))), ""
+        if command.startswith("tail "):
+            match = re.search(r"tail -c \+(\d+)", command)
+            assert match is not None
+            start_index = int(match.group(1)) - 1
+            return self.history_payload.encode("utf-8")[start_index:].decode("utf-8"), ""
         return "", ""
 
     def close_all(self):
         return None
 
 
-def _orchestrator(tmp_path: Path) -> HPCOrchestrator:
+def _orchestrator(tmp_path: Path, connection: FakeConnection | None = None) -> HPCOrchestrator:
     tmp_path.mkdir(parents=True, exist_ok=True)
     exp_file = tmp_path / "experiments.yaml"
     exp_file.write_text("experiments: []\n", encoding="utf-8")
-    return HPCOrchestrator(str(exp_file), concurrency_limits={HPCType.OLIVIA: 1}, connection_manager=FakeConnection())
+    return HPCOrchestrator(
+        str(exp_file), concurrency_limits={HPCType.OLIVIA: 1}, connection_manager=connection or FakeConnection()
+    )
+
+
+def _history_line(*, epoch: int, loss: float, acc: float) -> dict:
+    return {
+        "timestamp": 100.0 + epoch,
+        "attempt": 1,
+        "epoch": epoch,
+        "step": None,
+        "metrics": {"loss": loss, "acc": acc},
+    }
+
+
+def _history_jsonl() -> str:
+    lines = [
+        HistoryEntry(**_history_line(epoch=1, loss=1.2, acc=0.4)).model_dump_json(),
+        HistoryEntry(**_history_line(epoch=2, loss=0.8, acc=0.6)).model_dump_json(),
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def _experiments() -> list[dict]:
@@ -42,12 +75,15 @@ def _experiments() -> list[dict]:
             "max_epochs": 4,
             "target_metric_name": "loss",
             "target_metric_value": 0.5,
+            "display_metric_info": {"loss": {"higher_better": False}, "acc": {"higher_better": True}},
+            "history": [_history_line(epoch=1, loss=1.2, acc=0.4), _history_line(epoch=2, loss=0.8, acc=0.6)],
         },
         {
             "experiment_id": "exp-2",
             "dataset_name": "dataset-b",
             "status": ExperimentStatus.PENDING,
             "hpc_assignment": HPCType.OLIVIA,
+            "history": [_history_line(epoch=1, loss=2.0, acc=0.2), _history_line(epoch=2, loss=1.5, acc=0.3)],
         },
     ]
 
@@ -149,6 +185,107 @@ def test_textual_enter_opens_placeholder_modal_and_escape_closes(tmp_path: Path)
             await pilot.press("escape")
             await pilot.pause(0.1)
             assert not isinstance(app.screen, PerRunMenuScreen)
+
+    asyncio.run(run())
+
+
+def test_textual_per_run_menu_opens_plot_screen_for_selected_run(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        orch._publish_dashboard_snapshot(_experiments())
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 36)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("down")
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, PerRunMenuScreen)
+            assert app.screen.query_one("#per-run-actions").children[0].id == "view-plots"
+
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            assert isinstance(app.screen, PerRunPlotScreen)
+            assert app.screen.exp["experiment_id"] == "exp-2"
+
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, PerRunMenuScreen)
+
+    asyncio.run(run())
+
+
+def test_textual_plot_screen_renders_metrics_and_toggles(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        orch._publish_dashboard_snapshot(_experiments())
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 36)) as pilot:
+            await app.push_screen(PerRunPlotScreen(_experiments()[0]))
+            await pilot.pause(0.3)
+            screen = app.screen
+            assert isinstance(screen, PerRunPlotScreen)
+            assert screen.metric_keys == ["acc", "loss"]
+            assert screen.selected_metric == "acc"
+            assert "exp-1 - acc" in screen._last_plot_text
+
+            await pilot.press("down")
+            await pilot.pause(0.1)
+            assert screen.selected_metric == "loss"
+            assert "exp-1 - loss" in screen._last_plot_text
+
+            await pilot.press("l")
+            await pilot.pause(0.1)
+            assert screen.log_scale is True
+
+            await pilot.press("b")
+            await pilot.pause(0.1)
+            assert screen.show_best_overlay is True
+            assert screen._higher_better("loss") is False
+            assert "best(loss)" in screen._last_plot_text
+
+    asyncio.run(run())
+
+
+def test_textual_plot_screen_empty_state(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 36)) as pilot:
+            await app.push_screen(PerRunPlotScreen({"experiment_id": "empty"}))
+            await pilot.pause(0.2)
+            screen = app.screen
+            assert isinstance(screen, PerRunPlotScreen)
+            assert screen._last_plot_text == "No history available"
+
+    asyncio.run(run())
+
+
+def test_textual_plot_screen_force_reads_history_on_mount(tmp_path: Path) -> None:
+    async def run() -> None:
+        connection = FakeConnection(history_payload=_history_jsonl())
+        orch = _orchestrator(tmp_path, connection=connection)
+        exp = {
+            "experiment_id": "exp-force",
+            "job_id": "12345",
+            "hpc_assignment": HPCType.OLIVIA,
+            "save_path": str(tmp_path),
+        }
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 36)) as pilot:
+            await app.push_screen(PerRunPlotScreen(exp))
+            await pilot.pause(0.2)
+            screen = app.screen
+            assert isinstance(screen, PerRunPlotScreen)
+            assert len(screen.history) == 2
+            assert screen.metric_keys == ["acc", "loss"]
 
     asyncio.run(run())
 

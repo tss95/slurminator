@@ -57,6 +57,27 @@ class TextualDashboardApp(App[None]):
         text-style: bold;
         margin-bottom: 1;
     }
+
+    PerRunPlotScreen {
+        layout: vertical;
+    }
+
+    #plot-content {
+        height: 1fr;
+        layout: horizontal;
+    }
+
+    #metrics {
+        width: 28;
+        height: 1fr;
+        border-right: solid $accent;
+    }
+
+    #plot {
+        width: 1fr;
+        height: 1fr;
+        padding: 0 1;
+    }
     """
 
     def __init__(

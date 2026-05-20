@@ -25,6 +25,7 @@ from slurminator.status_ingest import (
     StatusIngestContext,
     apply_target_status_to_experiment,
     extract_display_metrics,
+    force_read_full_history as force_read_full_history_from_status,
     populate_display_metrics,
     update_experiment_config_with_metrics,
     update_running_experiment_info,
@@ -700,6 +701,32 @@ class HPCOrchestrator:
             projection_options=self.projection_options,
         )
         update_experiment_config_with_metrics(exp, data, context)
+
+    def force_read_full_history(self, exp: dict[str, Any]) -> None:
+        """Force a one-shot full history read for dashboard drill-in screens."""
+        if not exp.get("save_path"):
+            hpc_type = exp.get("hpc_assignment")
+            cluster_config = HPC_CONFIGS.get(hpc_type)
+            if cluster_config is None and hpc_type is not None:
+                try:
+                    cluster_config = HPC_CONFIGS.get(HPCType[str(hpc_type).upper()])
+                except KeyError:
+                    cluster_config = None
+            save_path = getattr(cluster_config, "save_path", None) if cluster_config else None
+            if save_path:
+                exp["save_path"] = str(save_path)
+
+        if not exp.get("job_id") or not exp.get("hpc_assignment") or not exp.get("save_path"):
+            return
+
+        context = StatusIngestContext(
+            connection_manager=self.connection_manager,
+            hpc_configs=HPC_CONFIGS,
+            load_yaml=self._load_yaml,
+            save_yaml=self._save_yaml,
+            projection_options=self.projection_options,
+        )
+        force_read_full_history_from_status(exp, context)
 
     def _extract_display_metrics(self, exp: dict) -> dict:
         """Extract display metrics for UI from target-schema display metadata.
