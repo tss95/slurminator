@@ -203,7 +203,8 @@ class TextualDashboardApp(App[None]):
 
     def _run_in_thread(self) -> None:
         try:
-            self.run(headless=self.headless)
+            with suppress_thread_signal_registration():
+                self.run(headless=self.headless)
         except BaseException as exc:  # pragma: no cover - defensive dashboard isolation
             self._run_error = exc
             logger.warning(

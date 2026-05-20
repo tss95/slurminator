@@ -277,6 +277,26 @@ def test_textual_thread_signal_registration_is_ignored() -> None:
     assert "previous" in result
 
 
+def test_textual_run_in_thread_wraps_signal_registration(monkeypatch) -> None:
+    app = TextualDashboardApp(refresh_interval=0.05)
+    result: dict[str, object] = {}
+    signal_number = getattr(signal, "SIGTTOU", signal.SIGTERM)
+
+    def fake_run(*, headless: bool = False) -> None:
+        result["headless"] = headless
+        result["previous"] = signal.signal(signal_number, lambda *_args: None)
+
+    monkeypatch.setattr(app, "run", fake_run)
+    thread = threading.Thread(target=app._run_in_thread)
+    thread.start()
+    thread.join(timeout=2.0)
+
+    assert not thread.is_alive()
+    assert app._run_error is None
+    assert result["headless"] is False
+    assert "previous" in result
+
+
 def test_textual_pause_resume_commands_are_observed_by_orchestrator(tmp_path: Path) -> None:
     async def run() -> None:
         orch = _orchestrator(tmp_path)
