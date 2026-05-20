@@ -101,6 +101,12 @@ def _history_jsonl() -> str:
     return "\n".join(lines) + "\n"
 
 
+def _has_styled_span(text: Text, substring: str, style: str) -> bool:
+    start = text.plain.index(substring)
+    end = start + len(substring)
+    return any(span.start <= start and span.end >= end and str(span.style) == style for span in text.spans)
+
+
 def _experiments() -> list[dict]:
     return [
         {
@@ -221,6 +227,16 @@ def test_textual_home_renders_summary_progress_and_footer(tmp_path: Path) -> Non
             assert "Experiment: experiments" in footer
             assert "Slurm: h=2h ram=auto gpu=1" in footer
             assert "GPU quota: OLIVIA unavailable" in footer
+            footer_text = screen._last_footer_text
+            assert _has_styled_span(footer_text, "Sweep:", "cyan")
+            assert _has_styled_span(footer_text, "Submissions:", "yellow")
+            assert _has_styled_span(footer_text, "active", "green")
+            assert _has_styled_span(footer_text, "Limits:", "cyan")
+            assert _has_styled_span(footer_text, "Host:", "yellow")
+            assert _has_styled_span(footer_text, "Experiment:", "cyan")
+            assert _has_styled_span(footer_text, "experiments", "dim")
+            assert _has_styled_span(footer_text, "Slurm:", "cyan")
+            assert _has_styled_span(footer_text, "GPU quota:", "yellow")
 
     asyncio.run(run())
 

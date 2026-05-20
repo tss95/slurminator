@@ -201,36 +201,47 @@ class HomeScreen(Screen[None]):
 
         footer = Text()
         footer.append(f"{counts[ExperimentStatus.COMPLETED]} / {total} completed", style="bold green")
-        footer.append(" | ", style="dim")
+        _append_separator(footer)
         footer.append(f"{remaining} left", style="bold yellow")
-        footer.append(" | Sweep: ")
-        footer.append(sweep_part)
+        _append_separator(footer)
+        _append_label_value(footer, "Sweep", sweep_part, label_style="cyan")
         project_label = self._infer_project_label(experiments)
         if project_label:
-            footer.append(" | ")
-            footer.append(project_label)
-        footer.append(" | Updated: ")
-        footer.append(dt.now().strftime("%H:%M:%S"))
+            _append_separator(footer)
+            _append_labeled_text(footer, project_label, label_style="cyan")
+        _append_separator(footer)
+        _append_label_value(footer, "Updated", dt.now().strftime("%H:%M:%S"), label_style="dim")
 
-        second_line_parts = [f"Submissions: {paused}", f"Limits: {self._limits_label()}"]
+        footer.append("\n")
+        _append_label_value(
+            footer,
+            "Submissions",
+            paused,
+            label_style="yellow",
+            value_style="bold yellow" if paused == "paused" else "green",
+        )
+        _append_separator(footer)
+        _append_label_value(footer, "Limits", self._limits_label(), label_style="cyan")
         hpc_label = self._infer_hpc_label(experiments)
         if hpc_label:
-            second_line_parts.append(hpc_label)
+            _append_separator(footer)
+            _append_labeled_text(footer, hpc_label, label_style="yellow")
         experiment_label = self._infer_experiment_label()
         if experiment_label:
-            second_line_parts.append(experiment_label)
+            _append_separator(footer)
+            _append_labeled_text(footer, experiment_label, label_style="cyan", value_style="dim")
         slurm_request_label = self._slurm_request_label(experiments)
         if slurm_request_label:
-            second_line_parts.append(slurm_request_label)
+            _append_separator(footer)
+            _append_labeled_text(footer, slurm_request_label, label_style="cyan")
         if any(bool(exp.get("oom_recovered")) for exp in experiments):
-            second_line_parts.append("* = recovered from OOM")
-        footer.append("\n")
-        footer.append(" | ".join(second_line_parts))
+            _append_separator(footer)
+            footer.append("* = recovered from OOM", style="bold red")
 
         quota_label = self._quota_label(experiments)
         if quota_label:
             footer.append("\n")
-            footer.append(quota_label)
+            footer.append_text(quota_label)
         return footer
 
     def _limit_total(self) -> int:
@@ -479,10 +490,10 @@ class HomeScreen(Screen[None]):
                     active.add(hpc)
         return active
 
-    def _quota_label(self, experiments: list[dict[str, Any]]) -> str | None:
+    def _quota_label(self, experiments: list[dict[str, Any]]) -> Text | None:
         active_hpcs = sorted(self._active_hpcs(experiments), key=lambda hpc: hpc.value)
         worst_case_by_hpc = self._estimate_orchestration_worst_case_hours_per_cluster(experiments)
-        lines: list[str] = []
+        lines: list[Text] = []
         hpcs_without_provider: list[str] = []
         for hpc_type in active_hpcs:
             provider = get_quota_provider(hpc_type)
@@ -499,11 +510,17 @@ class HomeScreen(Screen[None]):
                 )
             )
         if lines:
-            return "\n".join(lines)
+            return _join_text(lines, separator="\n")
         if hpcs_without_provider:
-            return f"Quota: no provider for {', '.join(hpcs_without_provider)}"
+            text = Text()
+            _append_label_value(
+                text, "Quota", f"no provider for {', '.join(hpcs_without_provider)}", label_style="yellow"
+            )
+            return text
         if active_hpcs:
-            return f"Quota: {', '.join(hpc.value for hpc in active_hpcs)}"
+            text = Text()
+            _append_label_value(text, "Quota", ", ".join(hpc.value for hpc in active_hpcs), label_style="yellow")
+            return text
         return None
 
     def _get_quota_snapshot(self, hpc_type: HPCType) -> QuotaSnapshot | None:
@@ -550,14 +567,24 @@ class HomeScreen(Screen[None]):
         return days_left, period_end.strftime("%d-%m-%y"), elapsed_pct
 
     @staticmethod
-    def _quota_period_segment(period_status: tuple[int, str, float], pace_delta_pp: float | None = None) -> str:
+    def _quota_period_segment(period_status: tuple[int, str, float], pace_delta_pp: float | None = None) -> Text:
         days_left, period_end_txt, period_elapsed_pct = period_status
+        segment = Text()
+        _append_label_value(segment, "Period", f"{days_left}d", label_style="yellow", value_style="bold yellow")
+        segment.append(" left (")
+        segment.append(f"{period_elapsed_pct:.1f}%", style="bold yellow")
+        segment.append(" elapsed")
         if pace_delta_pp is None:
-            return f"Period: {days_left}d left ({period_elapsed_pct:.1f}% elapsed; ends {period_end_txt})"
-        return (
-            f"Period: {days_left}d left ({period_elapsed_pct:.1f}% elapsed, {pace_delta_pp:+.1f}pp; "
-            f"ends {period_end_txt})"
-        )
+            segment.append("; ends ")
+            segment.append(period_end_txt, style="bold yellow")
+            segment.append(")")
+            return segment
+        segment.append(", ")
+        segment.append(f"{pace_delta_pp:+.1f}pp", style="bold yellow")
+        segment.append("; ends ")
+        segment.append(period_end_txt, style="bold yellow")
+        segment.append(")")
+        return segment
 
     def _render_quota_line(
         self,
@@ -566,19 +593,28 @@ class HomeScreen(Screen[None]):
         provider: QuotaProvider,
         snapshot: QuotaSnapshot | None,
         worst_case_hours: float | None,
-    ) -> str:
+    ) -> Text:
         period_status = self._quota_period_footer_status(provider, snapshot)
         period_segment = self._quota_period_segment(period_status) if period_status is not None else None
         provider_label = str(getattr(provider, "resource_label", "Quota"))
         provider_cluster = getattr(provider, "cluster_name", hpc_type.value)
+        quota_line = Text()
         if snapshot is None:
             hint = str(getattr(provider, "unavailable_hint", "quota probe unavailable"))
-            quota_line = f"{provider_label}: {provider_cluster} unavailable ({hint})"
-            return f"{quota_line} | {period_segment}" if period_segment else quota_line
+            _append_label_value(quota_line, provider_label, provider_cluster, label_style="yellow")
+            quota_line.append(f" unavailable ({hint})")
+            if period_segment is not None:
+                _append_separator(quota_line)
+                quota_line.append_text(period_segment)
+            return quota_line
 
         if snapshot.limit <= 0.0:
-            quota_line = f"{snapshot.resource_label}: {snapshot.cluster_name} unavailable (invalid quota limit)"
-            return f"{quota_line} | {period_segment}" if period_segment else quota_line
+            _append_label_value(quota_line, snapshot.resource_label, snapshot.cluster_name, label_style="yellow")
+            quota_line.append(" unavailable (invalid quota limit)")
+            if period_segment is not None:
+                _append_separator(quota_line)
+                quota_line.append_text(period_segment)
+            return quota_line
 
         pace_delta_pp = snapshot.used_pct - period_status[2] if period_status is not None else None
         period_with_delta = (
@@ -587,17 +623,26 @@ class HomeScreen(Screen[None]):
             else None
         )
         used_total = f"{_fmt_quota_amount(snapshot.used)}/{_fmt_quota_amount(snapshot.limit)}{snapshot.unit}"
-        quota_line = (
-            f"{snapshot.resource_label}: {snapshot.cluster_name} {_fmt_quota_amount(snapshot.remaining)}"
-            f"{snapshot.unit} left ({snapshot.used_pct:.1f}% used; {used_total})"
-        )
+        quota_line.append(f"{snapshot.resource_label}: ", style="yellow")
+        quota_line.append(f"{snapshot.cluster_name} ")
+        quota_line.append(f"{_fmt_quota_amount(snapshot.remaining)}{snapshot.unit}", style="bold yellow")
+        quota_line.append(" left (")
+        quota_line.append(f"{snapshot.used_pct:.1f}%", style="bold yellow")
+        quota_line.append(" used; ")
+        quota_line.append(used_total, style="bold yellow")
+        quota_line.append(")")
         if snapshot.worst_case_unit == "gpu_hours" and worst_case_hours is not None:
             pct_left = (worst_case_hours / snapshot.remaining * 100.0) if snapshot.remaining > 0 else 0.0
-            quota_line += (
-                f" | Orch worst-case: {_fmt_quota_amount(worst_case_hours)}{snapshot.unit} "
-                f"({pct_left:.1f}% of left)"
-            )
-        return f"{quota_line} | {period_with_delta}" if period_with_delta else quota_line
+            _append_separator(quota_line)
+            quota_line.append("Orch worst-case: ", style="yellow")
+            quota_line.append(f"{_fmt_quota_amount(worst_case_hours)}{snapshot.unit}", style="bold yellow")
+            quota_line.append(" (")
+            quota_line.append(f"{pct_left:.1f}%", style="bold yellow")
+            quota_line.append(" of left)")
+        if period_with_delta is not None:
+            _append_separator(quota_line)
+            quota_line.append_text(period_with_delta)
+        return quota_line
 
     def _estimate_orchestration_worst_case_hours_per_cluster(
         self, experiments: list[dict[str, Any]]
@@ -655,6 +700,34 @@ def _bar_segment(label: str, completed: float, total: float, style: str, value_t
     segment.append("░" * (TOP_BAR_WIDTH - filled), style="dim")
     segment.append(f" {value_text}")
     return segment
+
+
+def _append_separator(text: Text) -> None:
+    text.append(" | ", style="dim")
+
+
+def _append_label_value(
+    text: Text, label: str, value: str, *, label_style: str, value_style: str | None = None
+) -> None:
+    text.append(f"{label}: ", style=label_style)
+    text.append(value, style=value_style)
+
+
+def _append_labeled_text(text: Text, labeled_text: str, *, label_style: str, value_style: str | None = None) -> None:
+    if ":" not in labeled_text:
+        text.append(labeled_text, style=value_style)
+        return
+    label, value = labeled_text.split(":", 1)
+    _append_label_value(text, label, value.lstrip(), label_style=label_style, value_style=value_style)
+
+
+def _join_text(parts: list[Text], *, separator: str) -> Text:
+    joined = Text()
+    for index, part in enumerate(parts):
+        if index:
+            joined.append(separator)
+        joined.append_text(part)
+    return joined
 
 
 def _coerce_progress_fraction(current_val: object, max_val: object, *, allow_zero: bool = False) -> float | None:

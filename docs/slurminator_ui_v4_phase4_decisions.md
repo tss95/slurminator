@@ -95,6 +95,9 @@ spec left room for implementation detail.
   (`Completed`, aggregate run `Progress`, and `Running` slots), and a multi-line
   footer with completion, sweep, update time, submission state, active limits,
   host, experiment-file name, Slurm resource summary, and quota information.
+- Footer content is rendered as Rich `Text` with explicit style spans rather
+  than prejoined plain strings, so labels and quota numbers keep the color cues
+  from the Rich dashboard.
 - Provider-backed quota footer rendering is enabled in v4 with the same
   five-minute cache cadence as the Rich dashboard. If no provider-backed quota
   can be read, v4 shows the provider's unavailable hint rather than hiding the
