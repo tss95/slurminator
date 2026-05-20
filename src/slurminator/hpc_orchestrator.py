@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Type
 # unit tests (and --debug mode) can run without Rich installed.
 
 from slurminator.cli.override_parser import parse_override_list
+from slurminator.command_queue import CommandQueueContext, default_command_handlers, process_command_queue
 from slurminator.config import HPCType, HPC_CONFIGS, is_current_hpc
 from slurminator.experiments import ExperimentStatus
 from slurminator.experiment_policy import resolve_extra_remote_dirs, resolve_resource_overrides
@@ -102,6 +103,7 @@ class HPCOrchestrator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self.concurrency_limits = concurrency_limits or {}
+        self.submissions_paused = False
         self.state_store = ExperimentStateStore(self.experiment_file, self.concurrency_limits)
         self.poll_interval = poll_interval
         self.max_unqueue_seconds = max_unqueue_seconds
@@ -333,6 +335,7 @@ class HPCOrchestrator:
                     data = self._load_yaml()
                     exps = data["experiments"]
 
+                    self._process_command_queue(exps)
                     self._update_statuses(exps)
                     self._update_queue_estimates(exps)
                     data["experiments"] = exps
@@ -340,10 +343,11 @@ class HPCOrchestrator:
 
                     concurrency_used = self._count_concurrency(exps)
 
-                    for exp in exps:
-                        self._maybe_submit(exp, concurrency_used, data)
+                    if not self.submissions_paused:
+                        for exp in exps:
+                            self._maybe_submit(exp, concurrency_used, data)
 
-                    self._maybe_reassign_experiments(exps, concurrency_used, data)
+                        self._maybe_reassign_experiments(exps, concurrency_used, data)
 
                     data["experiments"] = exps
                     self._save_yaml(data)
@@ -370,6 +374,7 @@ class HPCOrchestrator:
                         data = self._load_yaml()
                         exps = data["experiments"]
 
+                        self._process_command_queue(exps)
                         self._update_statuses(exps)
                         self._update_queue_estimates(exps)
                         data["experiments"] = exps
@@ -377,10 +382,11 @@ class HPCOrchestrator:
 
                         concurrency_used = self._count_concurrency(exps)
 
-                        for exp in exps:
-                            self._maybe_submit(exp, concurrency_used, data)
+                        if not self.submissions_paused:
+                            for exp in exps:
+                                self._maybe_submit(exp, concurrency_used, data)
 
-                        self._maybe_reassign_experiments(exps, concurrency_used, data)
+                            self._maybe_reassign_experiments(exps, concurrency_used, data)
 
                         data["experiments"] = exps
                         self._save_yaml(data)
@@ -709,6 +715,52 @@ class HPCOrchestrator:
             save_yaml=self._save_yaml,
         )
         maybe_reassign_experiments(exps, concurrency_used, data, context)
+
+    def _process_command_queue(self, exps: list[dict[str, Any]]) -> int:
+        """Process pending operator commands for all known command queue roots."""
+        processed = 0
+        for save_path in self._command_queue_save_paths(exps):
+            context = CommandQueueContext(
+                save_path=save_path,
+                handlers=default_command_handlers(),
+                exps=exps,
+                orchestrator=self,
+                connection_manager=self.connection_manager,
+            )
+            processed += process_command_queue(context)
+        return processed
+
+    def _command_queue_save_paths(self, exps: list[dict[str, Any]]) -> list[Path]:
+        """Return local command-queue roots, preferring configured SAVE_PATH values."""
+        paths: list[Path] = []
+        env_save_path = os.getenv("SAVE_PATH")
+        if env_save_path:
+            paths.append(Path(env_save_path))
+
+        for exp in exps:
+            if exp.get("save_path"):
+                paths.append(Path(str(exp["save_path"])))
+
+        for hpc_type, limit in self.concurrency_limits.items():
+            if int(limit or 0) <= 0:
+                continue
+            cluster_config = HPC_CONFIGS.get(hpc_type)
+            save_path = getattr(cluster_config, "save_path", None) if cluster_config else None
+            if save_path:
+                paths.append(Path(str(save_path)))
+
+        if not paths:
+            paths.append(self.experiment_dir)
+
+        deduped: list[Path] = []
+        seen: set[str] = set()
+        for path in paths:
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(path)
+        return deduped
 
     # -------------------------------------------------------------------------
     # Done check
