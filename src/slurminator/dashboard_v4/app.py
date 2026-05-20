@@ -12,7 +12,9 @@ from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+from textual import events
 from textual.app import App
+from textual.geometry import Size
 from textual.widget import Widget
 
 from slurminator.dashboard_v4.home_screen import HomeScreen
@@ -239,6 +241,8 @@ class TextualDashboardApp(App[None]):
         if size == self._last_terminal_size:
             return
         self._last_terminal_size = size
+        textual_size = Size(size.columns, size.lines)
+        self.post_message(events.Resize(textual_size, textual_size))
         self.refresh(layout=True)
 
 

@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 from rich.text import Text
+from textual import events
 
 from slurminator.config import HPCType
 from slurminator.dashboard_v4.app import TextualDashboardApp, suppress_thread_signal_registration
@@ -282,19 +283,28 @@ def test_textual_terminal_size_poll_refreshes_only_on_change(monkeypatch) -> Non
     monkeypatch.setenv("TERM", "tmux-256color")
     app = TextualDashboardApp(refresh_interval=0.05)
     refresh_calls: list[dict[str, object]] = []
+    resize_messages: list[events.Resize] = []
 
     def fake_refresh(*args, **kwargs) -> None:  # noqa: ANN002, ANN003
         refresh_calls.append(dict(kwargs))
 
+    def fake_post_message(message) -> bool:  # noqa: ANN001
+        if isinstance(message, events.Resize):
+            resize_messages.append(message)
+        return True
+
     monkeypatch.setattr(app, "refresh", fake_refresh)
+    monkeypatch.setattr(app, "post_message", fake_post_message)
     monkeypatch.setattr(os, "get_terminal_size", lambda: os.terminal_size((100, 40)))
     app._poll_terminal_size()
     app._poll_terminal_size()
     assert refresh_calls == [{"layout": True}]
+    assert [(message.size.width, message.size.height) for message in resize_messages] == [(100, 40)]
 
     monkeypatch.setattr(os, "get_terminal_size", lambda: os.terminal_size((120, 50)))
     app._poll_terminal_size()
     assert refresh_calls == [{"layout": True}, {"layout": True}]
+    assert [(message.size.width, message.size.height) for message in resize_messages] == [(100, 40), (120, 50)]
 
 
 def test_textual_thread_signal_registration_is_ignored() -> None:
