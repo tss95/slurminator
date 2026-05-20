@@ -38,7 +38,7 @@ def test_project_status_to_experiment_uses_generic_defaults() -> None:
 
     updated = project_status_to_experiment(exp, status)
 
-    assert exp["status_schema_version"] == "1.0"
+    assert exp["status_schema_version"] == "1.1"
     assert exp["status_experiment_id"] == "exp-1"
     assert exp["status_run_name"] == "run-1"
     assert exp["status_links"] == {"tracker_run_id": "abc"}

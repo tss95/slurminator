@@ -6,6 +6,8 @@ import math
 import os
 import threading
 import time
+import json
+import logging
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
@@ -14,7 +16,9 @@ from slurminator.callbacks.status_normalization import (
     MetricDisplayCandidate,
     normalize_status_payload,
 )
-from slurminator.schemas.status_schema import OrchestratorStatus, StatusState, can_transition
+from slurminator.schemas.status_schema import HistoryEntry, OrchestratorStatus, StatusState, can_transition
+
+logger = logging.getLogger("slurminator")
 
 
 class OrchestratorStatusCallback:
@@ -54,6 +58,8 @@ class OrchestratorStatusCallback:
         self._status_root_name = _clean_string(status_root_name) or ".orchestrator_status"
 
         self.status_file: Path | None = None
+        self.history_file: Path | None = None
+        self._attempt: int = 1
         self._job_id: str | None = None
         self._sweep_id: str | None = None
         self._experiment_id: str | None = None
@@ -159,7 +165,9 @@ class OrchestratorStatusCallback:
             metric_info=self._metric_info,
             links=self._links,
         )
+        status.attempt = self._attempt
         self._atomic_write(status)
+        self._append_history(status)
         self._state = status.status
         self._last_write_at = now
         return True
@@ -183,6 +191,29 @@ class OrchestratorStatusCallback:
         self._sweep_id = sweep_id
         self._experiment_id = self._resolve_experiment_id(trainer, job_id=job_id)
         self.status_file = status_dir / f"status_{job_id}.json"
+        self.history_file = self.status_file.with_name(f"history_{job_id}.jsonl")
+        self._attempt = self._resolve_attempt_from_history()
+
+    def _resolve_attempt_from_history(self) -> int:
+        """Read the last history line and return its attempt plus one."""
+        if self.history_file is None or not self.history_file.exists():
+            return 1
+        try:
+            with self.history_file.open("rb") as handle:
+                handle.seek(0, 2)
+                size = handle.tell()
+                if size == 0:
+                    return 1
+                handle.seek(max(0, size - 1024))
+                tail = handle.read().decode("utf-8", errors="replace")
+            lines = [line for line in tail.splitlines() if line.strip()]
+            if not lines:
+                return 1
+            last = json.loads(lines[-1])
+            return int(last.get("attempt", 1)) + 1
+        except Exception as exc:
+            logger.debug("Failed to read history file for attempt resolution: %s", exc)
+            return 1
 
     def _resolve_save_path(self, trainer: object | None) -> Path | None:
         return self._save_path_override or _path_from_env("SAVE_PATH")
@@ -326,6 +357,24 @@ class OrchestratorStatusCallback:
                     tmp_path.unlink()
             except FileNotFoundError:  # pragma: no cover - race-safe cleanup
                 pass
+
+    def _append_history(self, status: OrchestratorStatus) -> None:
+        """Append a history entry when a status write contains metrics."""
+        if self.history_file is None or not status.metrics:
+            return
+        entry = HistoryEntry(
+            timestamp=status.last_update,
+            attempt=status.attempt,
+            epoch=status.progress.current_epoch,
+            step=status.progress.current_step,
+            metrics=dict(status.metrics),
+        )
+        try:
+            with self.history_file.open("a", encoding="utf-8") as handle:
+                handle.write(entry.model_dump_json())
+                handle.write("\n")
+        except Exception as exc:
+            logger.debug("Failed to append history entry: %s", exc)
 
     def _read_existing_state(self) -> StatusState | None:
         if self.status_file is None or not self.status_file.exists():
