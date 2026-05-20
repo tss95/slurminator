@@ -156,6 +156,24 @@ spec left room for implementation detail.
   when available). The next orchestrator poll performs the actual sbatch submit
   through the normal submission path.
 
+## Slice 10: Per-Run Settings
+
+- No formal Slice 10 contract file is present in this checkout. This pass was
+  scoped from the existing per-run `Settings` placeholder and submission
+  contracts.
+- Settings are explicitly "next submission" settings. They do not mutate an
+  already-running Slurm allocation. The form writes an `update_run_settings`
+  command, and the orchestrator applies the changes on its next command-queue
+  pass.
+- Editable fields are walltime override, memory override, GPU count override,
+  and pinned HPC. Walltime is stored as `time_hours_override`, because that
+  field already has highest precedence in Slurminator's submission resource
+  resolution. Memory and GPU count are stored under `resource_overrides`, and
+  pinned HPC is stored as `pinned_hpc`.
+- Blank fields clear the corresponding override. The form also exposes a
+  `Clear overrides` action for clearing all four fields at once, plus `Return`
+  as a non-destructive exit path.
+
 ## Known Terminal Compatibility
 
 ### tmux + TERM requirement

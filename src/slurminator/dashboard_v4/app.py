@@ -128,6 +128,28 @@ class TextualDashboardApp(App[None]):
         margin-bottom: 1;
     }
 
+    #settings-form {
+        width: 64;
+        height: auto;
+        max-height: 24;
+        border: solid $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #settings-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #settings-message {
+        margin-bottom: 1;
+    }
+
+    .settings-field-label {
+        margin-top: 1;
+    }
+
     PerRunPlotScreen {
         layout: vertical;
     }

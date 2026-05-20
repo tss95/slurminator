@@ -52,6 +52,7 @@ def default_command_handlers() -> dict[str, CommandHandler]:
         "cancel_run": handle_cancel_run,
         "cancel_all": handle_cancel_all,
         "relaunch_run": handle_relaunch_run,
+        "update_run_settings": handle_update_run_settings,
         "pause_submissions": handle_pause_submissions,
         "resume_submissions": handle_resume_submissions,
         "set_concurrency_limit": handle_set_concurrency_limit,
@@ -152,6 +153,43 @@ def handle_relaunch_run(cmd: Command, ctx: CommandQueueContext) -> None:
         exp.pop(key, None)
 
 
+def handle_update_run_settings(cmd: Command, ctx: CommandQueueContext) -> None:
+    """Update per-run settings that affect the next submission."""
+    exp = _find_experiment(ctx, cmd.target.get("experiment_id"))
+    if exp is None:
+        raise ValueError(f"unknown experiment_id: {cmd.target.get('experiment_id')!r}")
+
+    settings = cmd.target.get("settings")
+    if not isinstance(settings, dict):
+        raise ValueError("update_run_settings requires target.settings")
+
+    if "time_hours" in settings:
+        time_hours = _coerce_optional_positive_int(settings["time_hours"], "time_hours")
+        if time_hours is None:
+            exp.pop("time_hours_override", None)
+            _remove_resource_override(exp, "time_hours")
+        else:
+            exp["time_hours_override"] = time_hours
+            _remove_resource_override(exp, "time_hours")
+
+    if "memory_gb" in settings:
+        memory_gb = _coerce_optional_positive_int(settings["memory_gb"], "memory_gb")
+        _set_resource_override(exp, "memory_gb", memory_gb, aliases=("mem_gb",))
+
+    if "gpu_count" in settings:
+        gpu_count = _coerce_optional_positive_int(settings["gpu_count"], "gpu_count")
+        _set_resource_override(exp, "gpu_count", gpu_count)
+
+    if "pinned_hpc" in settings:
+        pinned_hpc = _coerce_optional_hpc(settings["pinned_hpc"])
+        if pinned_hpc is None:
+            exp.pop("pinned_hpc", None)
+        else:
+            exp["pinned_hpc"] = pinned_hpc.value
+
+    exp["settings_updated_at"] = time.time()
+
+
 def handle_pause_submissions(cmd: Command, ctx: CommandQueueContext) -> None:
     """Pause new job submission for the current orchestrator session."""
     ctx.orchestrator.submissions_paused = True
@@ -222,6 +260,56 @@ def _coerce_hpc(value: object) -> HPCType | None:
             return None
 
 
+def _coerce_optional_positive_int(value: object, field_name: str) -> int | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = int(text)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a positive integer or blank") from exc
+    if parsed <= 0:
+        raise ValueError(f"{field_name} must be a positive integer or blank")
+    return parsed
+
+
+def _coerce_optional_hpc(value: object) -> HPCType | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    hpc_type = _coerce_hpc(text)
+    if hpc_type is None:
+        raise ValueError(f"unknown hpc: {value!r}")
+    return hpc_type
+
+
+def _set_resource_override(exp: dict[str, Any], key: str, value: int | None, *, aliases: tuple[str, ...] = ()) -> None:
+    if value is None:
+        _remove_resource_override(exp, key, *aliases)
+        return
+    overrides = exp.get("resource_overrides")
+    if not isinstance(overrides, dict):
+        overrides = {}
+        exp["resource_overrides"] = overrides
+    for alias in aliases:
+        overrides.pop(alias, None)
+    overrides[key] = value
+
+
+def _remove_resource_override(exp: dict[str, Any], key: str, *aliases: str) -> None:
+    overrides = exp.get("resource_overrides")
+    if not isinstance(overrides, dict):
+        return
+    for item in (key, *aliases):
+        overrides.pop(item, None)
+    if not overrides:
+        exp.pop("resource_overrides", None)
+
+
 def _queue_dir(context: CommandQueueContext, name: str) -> Path:
     return context.save_path / ".orchestrator_status" / "_commands" / name
 
@@ -265,6 +353,7 @@ __all__ = [
     "handle_cancel_all",
     "handle_cancel_run",
     "handle_relaunch_run",
+    "handle_update_run_settings",
     "handle_pause_submissions",
     "handle_resume_submissions",
     "handle_set_concurrency_limit",

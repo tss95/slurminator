@@ -11,6 +11,7 @@ from slurminator.command_queue import (
     handle_cancel_all,
     handle_cancel_run,
     handle_relaunch_run,
+    handle_update_run_settings,
     handle_pause_submissions,
     handle_resume_submissions,
     handle_set_concurrency_limit,
@@ -173,6 +174,73 @@ def test_handle_relaunch_run_rejects_stale_job_id(tmp_path) -> None:
 
     assert exp["status"] == ExperimentStatus.FAILED
     assert exp["job_id"] == "new-job"
+
+
+def test_handle_update_run_settings_updates_next_submission_fields(tmp_path) -> None:
+    exp = {
+        "experiment_id": "exp-1",
+        "status": ExperimentStatus.PENDING,
+        "resource_overrides": {"mem_gb": 80, "gpu_count": 1},
+        "pinned_hpc": "FOX",
+    }
+
+    handle_update_run_settings(
+        _command(
+            "update_run_settings",
+            {
+                "experiment_id": "exp-1",
+                "settings": {"time_hours": "6", "memory_gb": "160", "gpu_count": "2", "pinned_hpc": "OLIVIA"},
+            },
+        ),
+        _context(tmp_path, [exp]),
+    )
+
+    assert exp["time_hours_override"] == 6
+    assert exp["resource_overrides"] == {"memory_gb": 160, "gpu_count": 2}
+    assert exp["pinned_hpc"] == "OLIVIA"
+    assert isinstance(exp["settings_updated_at"], float)
+
+
+def test_handle_update_run_settings_clears_blank_overrides(tmp_path) -> None:
+    exp = {
+        "experiment_id": "exp-1",
+        "status": ExperimentStatus.PENDING,
+        "time_hours_override": 6,
+        "resource_overrides": {"memory_gb": 160, "gpu_count": 2},
+        "pinned_hpc": "OLIVIA",
+    }
+
+    handle_update_run_settings(
+        _command(
+            "update_run_settings",
+            {
+                "experiment_id": "exp-1",
+                "settings": {"time_hours": None, "memory_gb": "", "gpu_count": None, "pinned_hpc": ""},
+            },
+        ),
+        _context(tmp_path, [exp]),
+    )
+
+    assert "time_hours_override" not in exp
+    assert "resource_overrides" not in exp
+    assert "pinned_hpc" not in exp
+    assert isinstance(exp["settings_updated_at"], float)
+
+
+def test_handle_update_run_settings_rejects_invalid_values(tmp_path) -> None:
+    exp = {"experiment_id": "exp-1", "status": ExperimentStatus.PENDING}
+
+    with pytest.raises(ValueError, match="memory_gb must be a positive integer"):
+        handle_update_run_settings(
+            _command("update_run_settings", {"experiment_id": "exp-1", "settings": {"memory_gb": "0"}}),
+            _context(tmp_path, [exp]),
+        )
+
+    with pytest.raises(ValueError, match="unknown hpc"):
+        handle_update_run_settings(
+            _command("update_run_settings", {"experiment_id": "exp-1", "settings": {"pinned_hpc": "UNKNOWN"}}),
+            _context(tmp_path, [exp]),
+        )
 
 
 def test_pause_and_resume_submission_handlers_are_idempotent(tmp_path) -> None:

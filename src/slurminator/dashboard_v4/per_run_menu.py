@@ -12,6 +12,7 @@ from textual.widgets import Label, ListItem, ListView
 from slurminator.dashboard_v4.commands import submit_command
 from slurminator.dashboard_v4.detail_screen import PerRunDetailScreen
 from slurminator.dashboard_v4.forms.relaunch_form import RelaunchFormScreen
+from slurminator.dashboard_v4.forms.settings_form import SettingsFormScreen
 from slurminator.dashboard_v4.keystrokes import PER_RUN_MENU_BINDINGS
 from slurminator.dashboard_v4.log_screen import PerRunLogScreen
 from slurminator.dashboard_v4.plot_screen import PerRunPlotScreen
@@ -64,6 +65,8 @@ class PerRunMenuScreen(ModalScreen[None]):
             self.app.pop_screen()
         elif event.item.id == "relaunch-run":
             self.app.push_screen(RelaunchFormScreen(self.exp))
+        elif event.item.id == "settings":
+            self.app.push_screen(SettingsFormScreen(self.exp))
         elif event.item.id == "return":
             self.app.pop_screen()
 

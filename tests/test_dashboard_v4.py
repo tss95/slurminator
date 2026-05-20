@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from rich.text import Text
 from textual import events
-from textual.widgets import Label
+from textual.widgets import Input, Label
 
 from slurminator.command_queue import Command
 from slurminator.config import HPCType
@@ -20,6 +20,7 @@ from slurminator.dashboard_v4.app import TextualDashboardApp, suppress_thread_si
 from slurminator.dashboard_v4.commands import submit_command
 from slurminator.dashboard_v4.detail_screen import PerRunDetailScreen
 from slurminator.dashboard_v4.forms.relaunch_form import RelaunchFormScreen
+from slurminator.dashboard_v4.forms.settings_form import SettingsFormScreen
 from slurminator.dashboard_v4.global_menu import GlobalMenuScreen
 from slurminator.dashboard_v4.log_screen import PerRunLogScreen
 from slurminator.dashboard_v4.per_run_menu import PerRunMenuScreen
@@ -719,6 +720,81 @@ def test_textual_per_run_menu_relaunch_writes_relaunch_command(tmp_path: Path) -
             assert len(commands) == 1
             assert commands[0].action == "relaunch_run"
             assert commands[0].target == {"experiment_id": "exp-1", "job_id": "12345"}
+
+    asyncio.run(run())
+
+
+def test_textual_per_run_menu_settings_writes_update_command(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+        exp = dict(_experiments()[0])
+        exp["time_hours_override"] = 4
+        exp["resource_overrides"] = {"memory_gb": 120, "gpu_count": 1}
+        exp["pinned_hpc"] = "FOX"
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            await app.push_screen(PerRunMenuScreen(exp))
+            await pilot.pause(0.1)
+            actions = app.screen.query_one("#per-run-actions")
+            actions.index = 5
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, SettingsFormScreen)
+
+            assert app.screen.query_one("#settings-time-hours", Input).value == "4"
+            assert app.screen.query_one("#settings-memory-gb", Input).value == "120"
+            assert app.screen.query_one("#settings-gpu-count", Input).value == "1"
+            assert app.screen.query_one("#settings-pinned-hpc", Input).value == "FOX"
+
+            app.screen.query_one("#settings-time-hours", Input).value = "8"
+            app.screen.query_one("#settings-memory-gb", Input).value = "240"
+            app.screen.query_one("#settings-gpu-count", Input).value = "2"
+            app.screen.query_one("#settings-pinned-hpc", Input).value = "OLIVIA"
+            settings_actions = app.screen.query_one("#settings-actions")
+            settings_actions.index = 0
+            settings_actions.focus()
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+
+            commands = _pending_commands(tmp_path)
+            assert len(commands) == 1
+            assert commands[0].action == "update_run_settings"
+            assert commands[0].target == {
+                "experiment_id": "exp-1",
+                "settings": {"time_hours": "8", "memory_gb": "240", "gpu_count": "2", "pinned_hpc": "OLIVIA"},
+            }
+
+    asyncio.run(run())
+
+
+def test_textual_settings_form_clear_overrides_writes_clear_command(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+        exp = dict(_experiments()[0])
+        exp["time_hours_override"] = 4
+        exp["resource_overrides"] = {"memory_gb": 120, "gpu_count": 1}
+        exp["pinned_hpc"] = "FOX"
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            await app.push_screen(SettingsFormScreen(exp))
+            await pilot.pause(0.1)
+            settings_actions = app.screen.query_one("#settings-actions")
+            settings_actions.index = 1
+            settings_actions.focus()
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+
+            commands = _pending_commands(tmp_path)
+            assert len(commands) == 1
+            assert commands[0].action == "update_run_settings"
+            assert commands[0].target == {
+                "experiment_id": "exp-1",
+                "settings": {"time_hours": None, "memory_gb": None, "gpu_count": None, "pinned_hpc": None},
+            }
 
     asyncio.run(run())
 
