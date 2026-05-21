@@ -302,11 +302,59 @@ def _abbr_metric(metric_key: str | None) -> str:
 
 
 def _format_sparkline(exp: dict[str, Any], primary_metric: object, *, thresholds: SparklineThresholds | object | None):
-    metric_name = str(primary_metric) if primary_metric else ""
-    values = _history_metric_values(exp, metric_name)
-    if len(values) < 2:
-        return "-"
-    return render_sparkline(values, width=20, higher_better=_higher_better(exp, metric_name), thresholds=thresholds)
+    for metric_name in _sparkline_metric_candidates(exp, primary_metric):
+        values = _history_metric_values(exp, metric_name)
+        if len(values) >= 2:
+            return render_sparkline(
+                values, width=20, higher_better=_higher_better(exp, metric_name), thresholds=thresholds
+            )
+    return "-"
+
+
+def _sparkline_metric_candidates(exp: dict[str, Any], primary_metric: object) -> list[str]:
+    candidates: list[str] = []
+
+    def add(value: object) -> None:
+        if value is None:
+            return
+        metric_name = str(value)
+        if metric_name and metric_name not in candidates:
+            candidates.append(metric_name)
+
+    primary_name = str(primary_metric) if primary_metric else ""
+    add(primary_name)
+
+    metric_info = exp.get("display_metric_info") or exp.get("metric_info") or {}
+    if isinstance(metric_info, dict):
+        for metric_key, info in metric_info.items():
+            if metric_key == primary_name:
+                add(metric_key)
+                continue
+            shortform = info.get("shortform") if isinstance(info, dict) else None
+            if shortform and str(shortform) == primary_name:
+                add(metric_key)
+
+    add(exp.get("target_metric_name"))
+    add(exp.get("secondary_metric_name"))
+    for metric_key in _history_metric_keys(exp):
+        add(metric_key)
+    return candidates
+
+
+def _history_metric_keys(exp: dict[str, Any]) -> list[str]:
+    keys: list[str] = []
+    history = exp.get("history")
+    if not isinstance(history, list):
+        return keys
+    for entry in history:
+        metrics = entry.get("metrics") if isinstance(entry, dict) else None
+        if not isinstance(metrics, dict):
+            continue
+        for metric_key in metrics:
+            metric_name = str(metric_key)
+            if metric_name not in keys:
+                keys.append(metric_name)
+    return keys
 
 
 def _history_metric_values(exp: dict[str, Any], metric_name: str) -> list[float]:

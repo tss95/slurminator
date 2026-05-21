@@ -19,9 +19,11 @@ from slurminator.config import HPCType
 from slurminator.dashboard_v4.app import TextualDashboardApp, suppress_thread_signal_registration
 from slurminator.dashboard_v4.commands import submit_command
 from slurminator.dashboard_v4.detail_screen import PerRunDetailScreen
+from slurminator.dashboard_v4.forms.concurrency_form import ConcurrencyFormScreen
 from slurminator.dashboard_v4.forms.relaunch_form import RelaunchFormScreen
 from slurminator.dashboard_v4.forms.settings_form import SettingsFormScreen
 from slurminator.dashboard_v4.global_menu import GlobalMenuScreen
+from slurminator.dashboard_v4.help_screen import HelpScreen
 from slurminator.dashboard_v4.log_screen import PerRunLogScreen
 from slurminator.dashboard_v4 import plot_screen as plot_screen_module
 from slurminator.dashboard_v4.per_run_menu import PerRunMenuScreen
@@ -206,6 +208,12 @@ def test_textual_home_table_renders_and_cursor_moves(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_textual_app_title_is_slurminator() -> None:
+    app = TextualDashboardApp(refresh_interval=0.05)
+
+    assert app.title == "Slurminator"
+
+
 def test_textual_home_renders_summary_progress_and_footer(tmp_path: Path) -> None:
     async def run() -> None:
         orch = _orchestrator(tmp_path)
@@ -317,6 +325,55 @@ def test_textual_home_table_renders_sparkline_and_toggles_column(tmp_path: Path)
     asyncio.run(run())
 
 
+def test_textual_home_table_trajectory_resolves_shortform_history_metric(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        exp = dict(_experiments()[0])
+        exp["target_metric_name"] = "vloss"
+        exp["target_metric_value"] = 0.8
+        exp["display_metric_info"] = {"val/loss": {"shortform": "vloss", "higher_better": False}}
+        exp["history"] = [
+            {"timestamp": 1.0, "attempt": 1, "epoch": 1, "step": None, "metrics": {"val/loss": 1.2}},
+            {"timestamp": 2.0, "attempt": 1, "epoch": 2, "step": None, "metrics": {"val/loss": 0.8}},
+        ]
+        orch._publish_dashboard_snapshot([exp])
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.pause(0.2)
+            table = app.screen.query_one(ExperimentsTable)
+            trajectory = table.get_row_at(0)[6]
+            assert isinstance(trajectory, Text)
+            assert trajectory.plain != "-"
+
+    asyncio.run(run())
+
+
+def test_textual_home_table_trajectory_falls_back_to_history_metric(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        exp = dict(_experiments()[0])
+        exp.pop("target_metric_name", None)
+        exp.pop("target_metric_value", None)
+        exp["history"] = [
+            {"timestamp": 1.0, "attempt": 1, "epoch": 1, "step": None, "metrics": {"loss": 1.2}},
+            {"timestamp": 2.0, "attempt": 1, "epoch": 2, "step": None, "metrics": {"loss": 0.8}},
+        ]
+        orch._publish_dashboard_snapshot([exp])
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.pause(0.2)
+            table = app.screen.query_one(ExperimentsTable)
+            trajectory = table.get_row_at(0)[6]
+            assert isinstance(trajectory, Text)
+            assert trajectory.plain != "-"
+
+    asyncio.run(run())
+
+
 def test_textual_global_menu_opens_and_escape_closes(tmp_path: Path) -> None:
     async def run() -> None:
         orch = _orchestrator(tmp_path)
@@ -376,13 +433,105 @@ def test_textual_global_menu_cancel_all_writes_command(tmp_path: Path) -> None:
         async with app.run_test(size=(120, 32)) as pilot:
             await pilot.pause(0.2)
             await pilot.press("g")
-            await pilot.press("down")
+            actions = app.screen.query_one("#global-actions")
+            actions.index = 2
             await pilot.press("enter")
             await pilot.pause(0.1)
             commands = _pending_commands(tmp_path)
             assert len(commands) == 1
             assert commands[0].action == "cancel_all"
             assert commands[0].target == {"scope": "session"}
+
+    asyncio.run(run())
+
+
+def test_textual_global_menu_concurrency_form_writes_limit_commands(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        orch._publish_dashboard_snapshot(_experiments())
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("g")
+            await pilot.pause(0.1)
+            global_actions = app.screen.query_one("#global-actions")
+            assert [child.id for child in global_actions.children] == [
+                "toggle-submissions",
+                "set-concurrency",
+                "cancel-all",
+                "help",
+                "close-global-menu",
+            ]
+            global_actions.index = 1
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, ConcurrencyFormScreen)
+            app.screen.query_one("#concurrency-limit-olivia", Input).value = "3"
+            form_actions = app.screen.query_one("#concurrency-actions")
+            form_actions.index = 0
+            form_actions.focus()
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+
+            commands = _pending_commands(tmp_path)
+            assert len(commands) == 1
+            assert commands[0].action == "set_concurrency_limit"
+            assert commands[0].target == {"hpc": "OLIVIA", "limit": 3}
+            assert orch._process_command_queue(_experiments()) == 1
+            assert orch.concurrency_limits[HPCType.OLIVIA] == 3
+
+    asyncio.run(run())
+
+
+def test_textual_concurrency_form_rejects_invalid_limit(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await app.push_screen(ConcurrencyFormScreen())
+            await pilot.pause(0.1)
+            app.screen.query_one("#concurrency-limit-olivia", Input).value = "-1"
+            actions = app.screen.query_one("#concurrency-actions")
+            actions.index = 0
+            actions.focus()
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+
+            assert isinstance(app.screen, ConcurrencyFormScreen)
+            assert "non-negative integer" in str(app.screen.query_one("#concurrency-error", Label).content)
+            assert _pending_commands(tmp_path) == []
+
+    asyncio.run(run())
+
+
+def test_textual_help_opens_from_question_mark_and_global_menu(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        orch._publish_dashboard_snapshot(_experiments())
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("?")
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, HelpScreen)
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            assert not isinstance(app.screen, HelpScreen)
+
+            await pilot.press("g")
+            await pilot.pause(0.1)
+            global_actions = app.screen.query_one("#global-actions")
+            global_actions.index = 3
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, HelpScreen)
+            assert "Set concurrency limits" in str(app.screen.query_one("#help-content").render())
 
     asyncio.run(run())
 

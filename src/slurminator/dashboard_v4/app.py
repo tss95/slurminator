@@ -45,7 +45,8 @@ else:  # pragma: no cover - non-Linux defensive
 class TextualDashboardApp(App[None]):
     """Textual dashboard implementing Slurminator's dashboard contract."""
 
-    BINDINGS: list[tuple[str, str, str]] = []
+    TITLE = "Slurminator"
+    BINDINGS = [("?", "help", "Help")]
 
     CSS = """
     HomeScreen {
@@ -150,6 +151,52 @@ class TextualDashboardApp(App[None]):
         margin-top: 1;
     }
 
+    #concurrency-form {
+        width: 56;
+        height: auto;
+        max-height: 22;
+        border: solid $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #concurrency-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #concurrency-message {
+        margin-bottom: 1;
+    }
+
+    .concurrency-field-label {
+        margin-top: 1;
+    }
+
+    #concurrency-error {
+        color: $error;
+        height: 1;
+        margin-top: 1;
+    }
+
+    #help-screen {
+        width: 64;
+        height: auto;
+        max-height: 30;
+        border: solid $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #help-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #help-content {
+        margin-bottom: 1;
+    }
+
     PerRunPlotScreen {
         layout: vertical;
     }
@@ -197,7 +244,9 @@ class TextualDashboardApp(App[None]):
         sparkline_thresholds: SparklineThresholds | object | None = None,
         **kwargs: Any,
     ) -> None:
+        app_title = str(kwargs.pop("title", "Slurminator"))
         super().__init__(**kwargs)
+        self.title = app_title
         if LinuxDriver is not None and self.driver_class is LinuxDriver:
             self.driver_class = ThreadFriendlyLinuxDriver
         warn_if_incompatible_term()
@@ -278,6 +327,14 @@ class TextualDashboardApp(App[None]):
         if isinstance(self.screen, GlobalMenuScreen):
             return
         self.push_screen(GlobalMenuScreen())
+
+    def action_help(self) -> None:
+        """Open the dashboard help overlay."""
+        from slurminator.dashboard_v4.help_screen import HelpScreen
+
+        if isinstance(self.screen, HelpScreen):
+            return
+        self.push_screen(HelpScreen())
 
     def _attach_orchestrator(self, orchestrator: Any) -> None:
         self.orchestrator = orchestrator

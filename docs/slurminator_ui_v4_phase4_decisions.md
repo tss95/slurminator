@@ -174,6 +174,28 @@ spec left room for implementation detail.
   `Clear overrides` action for clearing all four fields at once, plus `Return`
   as a non-destructive exit path.
 
+## Slice 11: Concurrency Modal And Help Overlay
+
+- No formal Slice 11 contract file is present in this checkout. This pass was
+  scoped from the remaining v4 placeholders and live review feedback: add a
+  global concurrency modal, add a lightweight help overlay, and set the app
+  title to `Slurminator`.
+- The concurrency modal writes one existing `set_concurrency_limit` command per
+  configured HPC. It validates non-negative integer values locally and relies on
+  the orchestrator's existing command-queue pass to apply the limits on the next
+  poll. This keeps the dashboard write path consistent with pause/resume and
+  cancel actions.
+- Help is available through `?` and through the global menu. It is intentionally
+  informational only; command behavior remains owned by the individual screens
+  and menus.
+- The app title is assigned after Textual app construction rather than passed as
+  `title=` to `App.__init__`, because the installed Textual version on OLIVIA
+  rejects that keyword argument.
+- The home-screen trajectory column now resolves metric history through the raw
+  metric key, the display shortform, and finally the available history metric
+  keys. Live runs exposed that exact-only lookup could leave the trajectory
+  blank even when the history file contained metric points.
+
 ## Known Terminal Compatibility
 
 ### tmux + TERM requirement
