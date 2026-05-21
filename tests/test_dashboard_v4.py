@@ -1449,6 +1449,91 @@ def test_textual_plot_screen_renders_metrics_and_toggles(tmp_path: Path) -> None
     asyncio.run(run())
 
 
+def test_textual_plot_screen_starts_on_selected_run_and_lists_plottable_runs(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        exps = _experiments()
+        exps[1]["status"] = ExperimentStatus.COMPLETED
+        pending = dict(exps[0])
+        pending["experiment_id"] = "exp-pending"
+        pending["status"] = ExperimentStatus.PENDING
+        orch._publish_dashboard_snapshot([exps[0], pending, exps[1]])
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(140, 36)) as pilot:
+            await app.push_screen(PerRunPlotScreen(exps[1]))
+            await pilot.pause(0.3)
+            screen = app.screen
+            assert isinstance(screen, PerRunPlotScreen)
+            assert [exp["experiment_id"] for exp in screen.plot_exps] == ["exp-1", "exp-2"]
+            assert screen._selected_experiment_id == "exp-2"
+            assert screen.query_one("#runs", ListView).index == 1
+
+    asyncio.run(run())
+
+
+def test_textual_plot_screen_side_arrows_switch_runs_and_preserve_metric(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        exps = _experiments()
+        exps[1]["status"] = ExperimentStatus.COMPLETED
+        exps[1]["history"] = [_history_line(epoch=1, loss=2.0, acc=0.2), _history_line(epoch=2, loss=1.5, acc=0.3)]
+        orch._publish_dashboard_snapshot(exps)
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(140, 36)) as pilot:
+            await app.push_screen(PerRunPlotScreen(exps[0]))
+            await pilot.pause(0.3)
+            screen = app.screen
+            assert isinstance(screen, PerRunPlotScreen)
+            screen._set_selected_metric("loss")
+            screen._redraw_plot()
+            assert screen._selected_experiment_id == "exp-1"
+            assert screen.selected_metric == "loss"
+            assert screen._last_x_values == [1.0, 2.0]
+
+            await pilot.press("right")
+            await pilot.pause(0.2)
+            assert screen._selected_experiment_id == "exp-2"
+            assert screen.query_one("#runs", ListView).index == 1
+            assert screen.selected_metric == "loss"
+            assert screen._last_x_values == [1.0, 2.0]
+            assert screen.history[0]["metrics"]["loss"] == 2.0
+
+            await pilot.press("left")
+            await pilot.pause(0.2)
+            assert screen._selected_experiment_id == "exp-1"
+            assert screen.query_one("#runs", ListView).index == 0
+            assert screen.selected_metric == "loss"
+            assert screen.history[0]["metrics"]["loss"] == 1.2
+
+    asyncio.run(run())
+
+
+def test_textual_plot_screen_run_list_selection_switches_run(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        exps = _experiments()
+        exps[1]["status"] = ExperimentStatus.COMPLETED
+        orch._publish_dashboard_snapshot(exps)
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(140, 36)) as pilot:
+            await app.push_screen(PerRunPlotScreen(exps[0]))
+            await pilot.pause(0.3)
+            screen = app.screen
+            assert isinstance(screen, PerRunPlotScreen)
+            runs = screen.query_one("#runs", ListView)
+            runs.action_cursor_down()
+            await pilot.pause(0.2)
+            assert screen._selected_experiment_id == "exp-2"
+
+    asyncio.run(run())
+
+
 def test_textual_plot_screen_uses_step_axis_for_step_history(tmp_path: Path) -> None:
     async def run() -> None:
         orch = _orchestrator(tmp_path)

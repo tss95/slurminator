@@ -107,6 +107,10 @@ spec left room for implementation detail.
   maximal plot sizing made plotext hard to read inside Textual panels. The v4
   plot screen now uses a simpler clear theme, no grid, clipped plain-text output,
   and capped dimensions so plots stay inside the widget bounds.
+- The plot screen now includes a left run selector for running and completed
+  runs from the current dashboard snapshot. It still opens with the run selected
+  from the per-run menu, while left/right arrow keys cycle runs and up/down keys
+  continue to select metrics.
 
 ## Slice 7.5: Home Screen Parity Polish
 

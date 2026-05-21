@@ -22,6 +22,8 @@ PLOT_BINDINGS = [
     Binding("g", "app.global_menu", "Global"),
     Binding("l", "toggle_log_scale", "Log scale"),
     Binding("b", "toggle_best_overlay", "Best overlay"),
+    Binding("left", "previous_run", "Previous run"),
+    Binding("right", "next_run", "Next run"),
     Binding("up", "metric_up", "Previous metric"),
     Binding("down", "metric_down", "Next metric"),
 ]

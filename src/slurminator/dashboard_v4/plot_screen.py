@@ -15,11 +15,13 @@ from textual.screen import Screen
 from textual.widgets import Footer, Header, Label, ListItem, ListView, Static
 
 from slurminator.dashboard_v4.keystrokes import PLOT_BINDINGS
+from slurminator.experiments import ExperimentStatus
 
 ProgressAxisUnit = Literal["epoch", "step"]
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 MAX_PLOT_WIDTH = 96
 MAX_PLOT_HEIGHT = 22
+PLOT_RUN_STATUSES = {ExperimentStatus.RUNNING, ExperimentStatus.COMPLETED}
 
 
 class PerRunPlotScreen(Screen[None]):
@@ -35,6 +37,9 @@ class PerRunPlotScreen(Screen[None]):
         self.selected_metric: str | None = None
         self.log_scale = False
         self.show_best_overlay = False
+        self.plot_exps: list[dict[str, Any]] = []
+        self._selected_experiment_id = str(exp.get("experiment_id", ""))
+        self._run_list_signature: tuple[tuple[str, str], ...] = ()
         self._last_plot_text = ""
         self._last_plot_dimensions: tuple[int, int] | None = None
         self._last_axis_unit: ProgressAxisUnit | None = None
@@ -42,21 +47,22 @@ class PerRunPlotScreen(Screen[None]):
         self._last_x_values: list[float] = []
         self._last_xticks: list[float] = []
         self._last_yticks: list[float] = []
+        self._exp_by_item_id: dict[str, dict[str, Any]] = {}
         self._metric_by_item_id: dict[str, str] = {}
 
     def compose(self) -> ComposeResult:
         """Compose the metric selector and plot panel."""
         yield Header()
         with Horizontal(id="plot-content"):
+            yield ListView(id="runs")
             yield ListView(id="metrics")
             yield Static("", id="plot")
         yield Footer()
 
     async def on_mount(self) -> None:
         """Force-load history and draw the initial plot."""
-        orchestrator = getattr(self.app, "orchestrator", None)
-        if orchestrator is not None and hasattr(orchestrator, "force_read_full_history"):
-            orchestrator.force_read_full_history(self.exp)
+        self._force_read_history(self.exp)
+        await self._rebuild_run_list(force=True)
         self.history = list(self.exp.get("history") or [])
         await self._rebuild_metric_list()
         self.set_interval(getattr(self.app, "refresh_interval", 1.0), self.refresh_from_orchestrator)
@@ -69,6 +75,12 @@ class PerRunPlotScreen(Screen[None]):
 
     async def refresh_from_orchestrator(self) -> None:
         """Refresh the plot from the latest app snapshot when history changes."""
+        previous_run_ids = [str(exp.get("experiment_id", "")) for exp in self.plot_exps]
+        await self._rebuild_run_list()
+        current_run_ids = [str(exp.get("experiment_id", "")) for exp in self.plot_exps]
+        if current_run_ids != previous_run_ids:
+            self._set_selected_run(self._selected_experiment_id)
+
         latest = self._latest_snapshot_exp()
         if latest is None:
             return
@@ -84,12 +96,27 @@ class PerRunPlotScreen(Screen[None]):
                 self._set_selected_metric(previous_metric)
             self._redraw_plot()
 
-    def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
-        """Redraw when the highlighted metric changes."""
+    async def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
+        """Redraw when the highlighted run or metric changes."""
+        if event.list_view.id == "runs":
+            exp = self._exp_for_item(event.item)
+            if exp is not None and str(exp.get("experiment_id", "")) != self._selected_experiment_id:
+                await self._activate_experiment(exp)
+            return
+        if event.list_view.id != "metrics":
+            return
         metric = self._metric_for_item(event.item)
         if metric is not None and metric != self.selected_metric:
             self.selected_metric = metric
             self._redraw_plot()
+
+    async def action_previous_run(self) -> None:
+        """Switch to the previous plottable run."""
+        await self._move_run(-1)
+
+    async def action_next_run(self) -> None:
+        """Switch to the next plottable run."""
+        await self._move_run(1)
 
     def action_metric_up(self) -> None:
         """Move to the previous metric."""
@@ -112,11 +139,64 @@ class PerRunPlotScreen(Screen[None]):
         self._redraw_plot()
 
     def _latest_snapshot_exp(self) -> dict[str, Any] | None:
-        experiment_id = self.exp.get("experiment_id")
+        experiment_id = self._selected_experiment_id or self.exp.get("experiment_id")
         for exp in self.app.get_dashboard_snapshot():
-            if exp.get("experiment_id") == experiment_id:
+            if str(exp.get("experiment_id", "")) == str(experiment_id):
                 return exp
         return None
+
+    async def _rebuild_run_list(self, *, force: bool = False) -> None:
+        self.plot_exps = _plot_run_candidates(self.app.get_dashboard_snapshot(), self.exp)
+        signature = _run_list_signature(self.plot_exps)
+        self._exp_by_item_id = {}
+        for index, exp in enumerate(self.plot_exps):
+            self._exp_by_item_id[_run_item_id(exp, index)] = exp
+        if not force and signature == self._run_list_signature:
+            return
+        self._run_list_signature = signature
+        runs = self.query_one("#runs", ListView)
+        await runs.clear()
+        items: list[ListItem] = []
+        for index, exp in enumerate(self.plot_exps):
+            item_id = _run_item_id(exp, index)
+            items.append(ListItem(Label(_run_label(exp)), id=item_id))
+        if items:
+            await runs.extend(items)
+        self._set_selected_run(self._selected_experiment_id)
+
+    async def _activate_experiment(self, exp: dict[str, Any], *, preserve_metric: bool = True) -> None:
+        previous_metric = self.selected_metric if preserve_metric else None
+        self.exp = exp
+        self._selected_experiment_id = str(exp.get("experiment_id", ""))
+        self._force_read_history(self.exp)
+        self.history = list(self.exp.get("history") or [])
+        await self._rebuild_metric_list()
+        if previous_metric in self.metric_keys:
+            self._set_selected_metric(previous_metric)
+        self._set_selected_run(self._selected_experiment_id)
+        self._redraw_plot()
+
+    async def _move_run(self, delta: int) -> None:
+        if not self.plot_exps:
+            return
+        current_index = _run_index(self.plot_exps, self._selected_experiment_id)
+        next_index = (current_index + delta) % len(self.plot_exps)
+        await self._activate_experiment(self.plot_exps[next_index])
+
+    def _set_selected_run(self, experiment_id: str | None) -> None:
+        if not self.plot_exps:
+            return
+        runs = self.query_one("#runs", ListView)
+        index = _run_index(self.plot_exps, experiment_id)
+        runs.index = index
+
+    def _force_read_history(self, exp: dict[str, Any]) -> None:
+        orchestrator = getattr(self.app, "orchestrator", None)
+        if orchestrator is not None and hasattr(orchestrator, "force_read_full_history"):
+            existing_history = list(exp.get("history") or [])
+            orchestrator.force_read_full_history(exp)
+            if existing_history and not exp.get("history"):
+                exp["history"] = existing_history
 
     async def _rebuild_metric_list(self) -> None:
         self.metric_keys = _metric_keys(self.history)
@@ -157,6 +237,11 @@ class PerRunPlotScreen(Screen[None]):
             return None
         return self._metric_by_item_id.get(item.id)
 
+    def _exp_for_item(self, item: ListItem | None) -> dict[str, Any] | None:
+        if item is None or not item.id:
+            return None
+        return self._exp_by_item_id.get(item.id)
+
     def _redraw_plot(self) -> None:
         plot = self.query_one("#plot", Static)
         if not self.history:
@@ -181,7 +266,9 @@ class PerRunPlotScreen(Screen[None]):
         xs = [point[0] for point in points]
         ys = [point[1] for point in points]
         width, height = _plot_dimensions(
-            plot, self.query_one("#plot-content", Horizontal), self.query_one("#metrics", ListView)
+            plot,
+            self.query_one("#plot-content", Horizontal),
+            [self.query_one("#runs", ListView), self.query_one("#metrics", ListView)],
         )
         self._last_plot_dimensions = (width, height)
         self._last_axis_unit = axis_unit
@@ -252,14 +339,73 @@ def _metric_item_id(metric: str) -> str:
     return f"metric-{safe}"
 
 
-def _plot_dimensions(plot: Static, container: Horizontal, metrics_list: ListView) -> tuple[int, int]:
+def _plot_dimensions(plot: Static, container: Horizontal, sidebars: list[ListView]) -> tuple[int, int]:
     plot_width = int(plot.size.width or 0) - 2
-    fallback_width = int(container.size.width or 0) - int(metrics_list.size.width or 0) - 4
+    fallback_width = int(container.size.width or 0) - sum(int(sidebar.size.width or 0) for sidebar in sidebars) - 4
     width = plot_width if plot_width > 0 else fallback_width
     plot_height = int(plot.size.height or 0) - 1
     fallback_height = int(container.size.height or 0) - 1
     height = plot_height if plot_height > 0 else fallback_height
     return max(min(width, MAX_PLOT_WIDTH), 30), max(min(height, MAX_PLOT_HEIGHT), 8)
+
+
+def _plot_run_candidates(snapshot: list[dict[str, Any]], current_exp: dict[str, Any]) -> list[dict[str, Any]]:
+    current_id = str(current_exp.get("experiment_id", ""))
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for exp in snapshot:
+        experiment_id = str(exp.get("experiment_id", ""))
+        if not experiment_id or experiment_id in seen:
+            continue
+        if _is_plot_run_candidate(exp) or experiment_id == current_id:
+            candidates.append(exp)
+            seen.add(experiment_id)
+    if current_id and current_id not in seen:
+        candidates.insert(0, current_exp)
+    elif not candidates:
+        candidates.append(current_exp)
+    return candidates
+
+
+def _is_plot_run_candidate(exp: dict[str, Any]) -> bool:
+    status = _coerce_experiment_status(exp.get("status"))
+    return status in PLOT_RUN_STATUSES
+
+
+def _coerce_experiment_status(value: object) -> ExperimentStatus | None:
+    if isinstance(value, ExperimentStatus):
+        return value
+    try:
+        return ExperimentStatus(str(value))
+    except ValueError:
+        try:
+            return ExperimentStatus[str(value).upper()]
+        except KeyError:
+            return None
+
+
+def _run_index(exps: list[dict[str, Any]], experiment_id: str | None) -> int:
+    if not exps:
+        return 0
+    for index, exp in enumerate(exps):
+        if str(exp.get("experiment_id", "")) == str(experiment_id):
+            return index
+    return 0
+
+
+def _run_list_signature(exps: list[dict[str, Any]]) -> tuple[tuple[str, str], ...]:
+    return tuple((str(exp.get("experiment_id", "")), str(_coerce_experiment_status(exp.get("status")))) for exp in exps)
+
+
+def _run_item_id(exp: dict[str, Any], index: int) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in str(exp.get("experiment_id", "")))
+    return f"run-{index}-{safe or 'unknown'}"
+
+
+def _run_label(exp: dict[str, Any]) -> str:
+    status = _coerce_experiment_status(exp.get("status"))
+    prefix = {ExperimentStatus.RUNNING: "RUN", ExperimentStatus.COMPLETED: "DONE"}.get(status, "RUN")
+    return f"{prefix} {_shorten_middle(str(exp.get('experiment_id', 'unknown')), 19)}"
 
 
 def _resolve_progress_unit(history: list[dict[str, Any]], exp: dict[str, Any]) -> ProgressAxisUnit:

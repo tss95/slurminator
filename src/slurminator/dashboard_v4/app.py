@@ -273,6 +273,12 @@ class TextualDashboardApp(App[None]):
         layout: horizontal;
     }
 
+    #runs {
+        width: 26;
+        height: 1fr;
+        border-right: solid $accent;
+    }
+
     #metrics {
         width: 28;
         height: 1fr;
