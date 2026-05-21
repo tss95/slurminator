@@ -179,6 +179,17 @@ class TextualDashboardApp(App[None]):
         margin-top: 1;
     }
 
+    #concurrency-buttons {
+        layout: horizontal;
+        height: 3;
+        margin-top: 1;
+    }
+
+    #concurrency-buttons Button {
+        width: 1fr;
+        margin-right: 1;
+    }
+
     #help-screen {
         width: 64;
         height: auto;

@@ -266,6 +266,21 @@ def test_handle_set_concurrency_limit_updates_orchestrator_limits(tmp_path) -> N
     assert orchestrator.concurrency_limits[HPCType.OLIVIA] == 3
 
 
+def test_handle_set_concurrency_limit_rejects_unconnected_hpc(tmp_path) -> None:
+    orchestrator = SimpleNamespace(
+        submissions_paused=False,
+        concurrency_limits={HPCType.OLIVIA: 1, HPCType.FOX: 0},
+        connection_manager=SimpleNamespace(_connected={HPCType.OLIVIA: True, HPCType.FOX: False}),
+    )
+
+    with pytest.raises(ValueError, match="unconnected hpc: FOX"):
+        handle_set_concurrency_limit(
+            _command("set_concurrency_limit", {"hpc": "FOX", "limit": 3}), _context(tmp_path, orchestrator=orchestrator)
+        )
+
+    assert orchestrator.concurrency_limits[HPCType.FOX] == 0
+
+
 def test_process_command_queue_moves_successful_commands_to_processed(tmp_path) -> None:
     _write_pending(tmp_path, _command("pause_submissions", {}))
     orchestrator = SimpleNamespace(submissions_paused=False, concurrency_limits={})

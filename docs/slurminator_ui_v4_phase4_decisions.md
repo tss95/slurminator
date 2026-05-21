@@ -185,6 +185,13 @@ spec left room for implementation detail.
   the orchestrator's existing command-queue pass to apply the limits on the next
   poll. This keeps the dashboard write path consistent with pause/resume and
   cancel actions.
+- Review adjustment: the modal now shows explicit `Apply limits` and `Return`
+  buttons. Pressing Enter in a limit field also applies the form; `Esc` returns
+  without saving to avoid accidental concurrency changes.
+- Only HPCs already connected in the current orchestrator session are editable.
+  The command handler also rejects `set_concurrency_limit` commands for
+  disconnected HPCs, so an operator cannot enable a cluster that the
+  orchestrator failed to connect to at startup.
 - Help is available through `?` and through the global menu. It is intentionally
   informational only; command behavior remains owned by the individual screens
   and menus.

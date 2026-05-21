@@ -205,10 +205,21 @@ def handle_set_concurrency_limit(cmd: Command, ctx: CommandQueueContext) -> None
     hpc_type = _coerce_hpc(cmd.target.get("hpc"))
     if hpc_type is None:
         raise ValueError(f"unknown hpc: {cmd.target.get('hpc')!r}")
+    if not _is_connected_hpc(ctx.orchestrator, hpc_type):
+        raise ValueError(f"cannot set concurrency limit for unconnected hpc: {hpc_type.name}")
     limit = int(cmd.target.get("limit"))
     if limit < 0:
         raise ValueError(f"concurrency limit must be >= 0, got {limit}")
     ctx.orchestrator.concurrency_limits[hpc_type] = limit
+
+
+def _is_connected_hpc(orchestrator: Any, hpc_type: HPCType) -> bool:
+    """Return False only when the orchestrator exposes a disconnected HPC map."""
+    connection_manager = getattr(orchestrator, "connection_manager", None)
+    connected = getattr(connection_manager, "_connected", None)
+    if not isinstance(connected, dict):
+        return True
+    return bool(connected.get(hpc_type, False))
 
 
 def scancel_via_connection(connection_manager: Any, hpc_type: HPCType, job_id: str) -> None:

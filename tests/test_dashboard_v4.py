@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from rich.text import Text
 from textual import events
+from textual.css.query import NoMatches
 from textual.widgets import Input, Label
 
 from slurminator.command_queue import Command
@@ -469,9 +470,7 @@ def test_textual_global_menu_concurrency_form_writes_limit_commands(tmp_path: Pa
             await pilot.pause(0.1)
             assert isinstance(app.screen, ConcurrencyFormScreen)
             app.screen.query_one("#concurrency-limit-olivia", Input).value = "3"
-            form_actions = app.screen.query_one("#concurrency-actions")
-            form_actions.index = 0
-            form_actions.focus()
+            app.screen.query_one("#apply-concurrency-limits").focus()
             await pilot.press("enter")
             await pilot.pause(0.1)
 
@@ -481,6 +480,29 @@ def test_textual_global_menu_concurrency_form_writes_limit_commands(tmp_path: Pa
             assert commands[0].target == {"hpc": "OLIVIA", "limit": 3}
             assert orch._process_command_queue(_experiments()) == 1
             assert orch.concurrency_limits[HPCType.OLIVIA] == 3
+
+    asyncio.run(run())
+
+
+def test_textual_concurrency_form_enter_in_input_writes_limit_commands(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await app.push_screen(ConcurrencyFormScreen())
+            await pilot.pause(0.1)
+            limit_input = app.screen.query_one("#concurrency-limit-olivia", Input)
+            limit_input.value = "4"
+            limit_input.focus()
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+
+            commands = _pending_commands(tmp_path)
+            assert len(commands) == 1
+            assert commands[0].action == "set_concurrency_limit"
+            assert commands[0].target == {"hpc": "OLIVIA", "limit": 4}
 
     asyncio.run(run())
 
@@ -495,15 +517,33 @@ def test_textual_concurrency_form_rejects_invalid_limit(tmp_path: Path) -> None:
             await app.push_screen(ConcurrencyFormScreen())
             await pilot.pause(0.1)
             app.screen.query_one("#concurrency-limit-olivia", Input).value = "-1"
-            actions = app.screen.query_one("#concurrency-actions")
-            actions.index = 0
-            actions.focus()
+            app.screen.query_one("#apply-concurrency-limits").focus()
             await pilot.press("enter")
             await pilot.pause(0.1)
 
             assert isinstance(app.screen, ConcurrencyFormScreen)
             assert "non-negative integer" in str(app.screen.query_one("#concurrency-error", Label).content)
             assert _pending_commands(tmp_path) == []
+
+    asyncio.run(run())
+
+
+def test_textual_concurrency_form_only_shows_connected_hpcs(tmp_path: Path) -> None:
+    async def run() -> None:
+        connection = FakeConnection()
+        connection._connected = {HPCType.OLIVIA: True, HPCType.FOX: False}
+        orch = _orchestrator(tmp_path, connection=connection)
+        orch.concurrency_limits[HPCType.FOX] = 2
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await app.push_screen(ConcurrencyFormScreen())
+            await pilot.pause(0.1)
+
+            assert app.screen.query_one("#concurrency-limit-olivia", Input).value == "1"
+            with pytest.raises(NoMatches):
+                app.screen.query_one("#concurrency-limit-fox", Input)
 
     asyncio.run(run())
 
