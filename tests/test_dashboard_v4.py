@@ -100,14 +100,17 @@ def _orchestrator(
     )
 
 
-def _history_line(*, epoch: int, loss: float, acc: float) -> dict:
-    return {
+def _history_line(*, epoch: int, loss: float, acc: float, step: int | None = None, unit: str | None = None) -> dict:
+    line = {
         "timestamp": 100.0 + epoch,
         "attempt": 1,
         "epoch": epoch,
-        "step": None,
+        "step": step,
         "metrics": {"loss": loss, "acc": acc},
     }
+    if unit is not None:
+        line["unit"] = unit
+    return line
 
 
 def _history_jsonl() -> str:
@@ -1319,6 +1322,117 @@ def test_textual_plot_screen_renders_metrics_and_toggles(tmp_path: Path) -> None
             assert "best(loss)" in screen._last_plot_text
 
     asyncio.run(run())
+
+
+def test_textual_plot_screen_uses_step_axis_for_step_history(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        history = [
+            _history_line(epoch=1, step=100, loss=1.0, acc=0.3, unit="step"),
+            _history_line(epoch=1, step=1400, loss=0.8, acc=0.5, unit="step"),
+            _history_line(epoch=2, step=5000, loss=0.6, acc=0.7, unit="step"),
+        ]
+        exp = {
+            "experiment_id": "step-run",
+            "history": history,
+            "progress": {"unit": "step"},
+            "display_metric_info": {"loss": {"higher_better": False}},
+        }
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 36)) as pilot:
+            await app.push_screen(PerRunPlotScreen(exp))
+            await pilot.pause(0.3)
+            screen = app.screen
+            assert isinstance(screen, PerRunPlotScreen)
+            screen._set_selected_metric("loss")
+            screen._redraw_plot()
+            assert screen._last_axis_unit == "step"
+            assert screen._last_axis_label == "Step"
+            assert screen._last_x_values == [100.0, 1400.0, 5000.0]
+            assert screen._last_xticks == [100.0, 1400.0, 5000.0]
+            assert screen._last_yticks
+
+    asyncio.run(run())
+
+
+def test_textual_plot_screen_uses_epoch_axis_for_epoch_history(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        history = [
+            _history_line(epoch=1, step=100, loss=1.0, acc=0.3, unit="epoch"),
+            _history_line(epoch=2, step=1400, loss=0.8, acc=0.5, unit="epoch"),
+            _history_line(epoch=3, step=5000, loss=0.6, acc=0.7, unit="epoch"),
+        ]
+        exp = {"experiment_id": "epoch-run", "history": history, "progress": {"unit": "epoch"}}
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 36)) as pilot:
+            await app.push_screen(PerRunPlotScreen(exp))
+            await pilot.pause(0.3)
+            screen = app.screen
+            assert isinstance(screen, PerRunPlotScreen)
+            screen._set_selected_metric("loss")
+            screen._redraw_plot()
+            assert screen._last_axis_unit == "epoch"
+            assert screen._last_axis_label == "Epoch"
+            assert screen._last_x_values == [1.0, 2.0, 3.0]
+            assert screen._last_xticks == [1.0, 2.0, 3.0]
+
+    asyncio.run(run())
+
+
+def test_textual_plot_screen_resolves_axis_unit_precedence_and_fallback() -> None:
+    history_with_unit = [
+        {"epoch": 1, "step": 100, "unit": "epoch", "metrics": {"loss": 1.0}},
+        {"epoch": 2, "step": 200, "unit": "step", "metrics": {"loss": 0.9}},
+    ]
+    assert plot_screen_module._resolve_progress_unit(history_with_unit, {"progress": {"unit": "epoch"}}) == "step"
+
+    history_without_unit = [
+        {"epoch": 1, "step": 100, "metrics": {"loss": 1.0}},
+        {"epoch": 2, "step": 200, "metrics": {"loss": 0.9}},
+    ]
+    assert plot_screen_module._resolve_progress_unit(history_without_unit, {"progress": {"unit": "step"}}) == "step"
+    assert plot_screen_module._resolve_progress_unit(history_without_unit, {"progress_unit": "epoch"}) == "epoch"
+
+    step_shaped_history = [
+        {"epoch": 1, "step": 100, "metrics": {"loss": 1.0}},
+        {"epoch": 1, "step": 1400, "metrics": {"loss": 0.9}},
+        {"epoch": 2, "step": 5000, "metrics": {"loss": 0.8}},
+    ]
+    assert plot_screen_module._resolve_progress_unit(step_shaped_history, {}) == "step"
+    assert plot_screen_module._resolve_progress_unit([], {}) == "epoch"
+
+    mixed_history = [
+        {"epoch": 1, "step": 100, "metrics": {"loss": 1.0}},
+        {"epoch": None, "step": 200, "metrics": {"loss": 0.9}},
+        {"epoch": 3, "step": None, "metrics": {"loss": 0.8}},
+    ]
+    assert plot_screen_module._series_for_metric(mixed_history, "loss", unit="step") == [
+        (100.0, 1.0),
+        (200.0, 0.9),
+        (3.0, 0.8),
+    ]
+    assert plot_screen_module._series_for_metric(mixed_history, "loss", unit="epoch") == [
+        (1.0, 1.0),
+        (200.0, 0.9),
+        (3.0, 0.8),
+    ]
+
+
+def test_textual_plot_screen_v1_1_reader_accepts_history_without_unit() -> None:
+    entry = HistoryEntry.model_validate_json(
+        '{"schema_version":"1.1","timestamp":100.0,"attempt":1,' '"epoch":2,"step":1400,"metrics":{"loss":0.9}}'
+    )
+
+    assert entry.unit is None
+    assert (
+        plot_screen_module._resolve_progress_unit([entry.model_dump(mode="json")], {"progress": {"unit": "step"}})
+        == "step"
+    )
 
 
 def test_textual_plot_screen_rebuilds_metric_list_without_duplicate_ids(tmp_path: Path) -> None:

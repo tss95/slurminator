@@ -9,6 +9,8 @@ from slurminator.schemas.status_schema import OrchestratorStatus
 _BASE_PROJECTION_FIELDS = (
     "status_schema_version",
     "status_experiment_id",
+    "progress",
+    "progress_unit",
     "current_epoch",
     "max_epochs",
     "current_step",
@@ -61,6 +63,8 @@ def project_status_to_experiment(
 
     put("status_schema_version", status.schema_version)
     put("status_experiment_id", status.experiment_id)
+    put("progress", progress.model_dump(mode="json"), skip_none=False)
+    put("progress_unit", progress.unit)
     put(run_name_field, status.display.run_name)
     put(links_field, links, skip_none=False)
 

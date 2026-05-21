@@ -370,6 +370,7 @@ class OrchestratorStatusCallback:
             attempt=status.attempt,
             epoch=status.progress.current_epoch,
             step=status.progress.current_step,
+            unit=status.progress.unit,
             metrics=metrics,
         )
         try:

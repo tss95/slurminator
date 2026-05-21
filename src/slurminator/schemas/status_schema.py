@@ -221,6 +221,7 @@ class HistoryEntry(BaseModel):
     attempt: int
     epoch: int | None
     step: int | None
+    unit: ProgressUnit | None = None
     metrics: dict[str, float]
 
 

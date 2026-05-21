@@ -85,6 +85,25 @@ spec left room for implementation detail.
 - Multi-run overlays, attempt filtering/coloring, detail screens, and log
   screens remain out of scope for Slice 5.
 
+## Plot Axis Resolution
+
+- Schema v1.1 includes optional `HistoryEntry.unit`. This field was folded into
+  v1.1 while the schema is still in development; readers accept earlier v1.1
+  history lines that do not yet contain the field by treating the unit as
+  unknown.
+- The plot screen resolves its canonical x-axis from, in order: the most recent
+  populated history-entry `unit`, the projected status row (`progress.unit` or
+  `progress_unit`), a shape fallback that prefers step when step values vary
+  meaningfully more than epoch values, and finally `epoch`.
+- Slurminator does not know about PMT pseudo-epochs. PMT-specific callbacks map
+  step-budget runs to the general schema contract `progress.unit="step"`;
+  dashboard plotting only consumes that declared unit.
+- Step-based plots prefer `step` values with an explicit `Step` x-axis label.
+  Epoch-based plots prefer `epoch` values with an explicit `Epoch` label.
+- The plot renderer now requests distributed x-axis ticks, linear y-axis ticks
+  when appropriate, gridlines, and point markers so short metric trajectories
+  remain readable in terminal-sized panels.
+
 ## Slice 7.5: Home Screen Parity Polish
 
 - No formal Slice 7.5 contract file is present in this checkout. This pass was
@@ -206,8 +225,8 @@ spec left room for implementation detail.
   all because Slurm jobs inherited `PMT_ENV_LOADED=1` from the launcher and
   `step_0.sh` could early-return inside `universal_job.sh`. PMT's job wrapper
   now forces `PMT_FORCE_RELOAD=1` when sourcing the env script so newly
-  submitted jobs pick up the sibling Slurminator source and write schema v1.1
-  status/history files.
+  submitted jobs pick up the sibling Slurminator source and write current
+  status/history schema files.
 
 ## Known Terminal Compatibility
 

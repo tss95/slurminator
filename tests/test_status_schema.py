@@ -52,9 +52,27 @@ def test_status_schema_v1_1_reader_accepts_v1_0_status_without_attempt():
 
 
 def test_history_entry_json_roundtrip():
-    entry = HistoryEntry(timestamp=100.0, attempt=2, epoch=3, step=12, metrics={"train/loss": 0.5, "val/acc": 0.75})
+    entry = HistoryEntry(
+        timestamp=100.0, attempt=2, epoch=3, step=12, unit="step", metrics={"train/loss": 0.5, "val/acc": 0.75}
+    )
 
     assert HistoryEntry.model_validate_json(entry.model_dump_json()) == entry
+
+
+def test_history_entry_v1_1_reader_accepts_earlier_v1_1_without_unit():
+    entry = HistoryEntry.model_validate(
+        {
+            "schema_version": "1.1",
+            "timestamp": 100.0,
+            "attempt": 1,
+            "epoch": 2,
+            "step": 200,
+            "metrics": {"train/loss": 0.5},
+        }
+    )
+
+    assert entry.schema_version == "1.1"
+    assert entry.unit is None
 
 
 def test_status_schema_rejects_orphan_display_metric_info():

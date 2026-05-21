@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Literal
 
 import plotext as plt
 from rich.text import Text
@@ -14,6 +14,8 @@ from textual.screen import Screen
 from textual.widgets import Footer, Header, Label, ListItem, ListView, Static
 
 from slurminator.dashboard_v4.keystrokes import PLOT_BINDINGS
+
+ProgressAxisUnit = Literal["epoch", "step"]
 
 
 class PerRunPlotScreen(Screen[None]):
@@ -31,6 +33,11 @@ class PerRunPlotScreen(Screen[None]):
         self.show_best_overlay = False
         self._last_plot_text = ""
         self._last_plot_dimensions: tuple[int, int] | None = None
+        self._last_axis_unit: ProgressAxisUnit | None = None
+        self._last_axis_label = ""
+        self._last_x_values: list[float] = []
+        self._last_xticks: list[float] = []
+        self._last_yticks: list[float] = []
         self._metric_by_item_id: dict[str, str] = {}
 
     def compose(self) -> ComposeResult:
@@ -150,16 +157,20 @@ class PerRunPlotScreen(Screen[None]):
         plot = self.query_one("#plot", Static)
         if not self.history:
             self._last_plot_text = "No history available"
+            self._clear_last_axis_state()
             plot.update(self._last_plot_text)
             return
         if not self.selected_metric:
             self._last_plot_text = "No metric history available"
+            self._clear_last_axis_state()
             plot.update(self._last_plot_text)
             return
 
-        points = _series_for_metric(self.history, self.selected_metric, log_scale=self.log_scale)
+        axis_unit = self._resolve_progress_unit()
+        points = _series_for_metric(self.history, self.selected_metric, unit=axis_unit, log_scale=self.log_scale)
         if not points:
             self._last_plot_text = f"No plottable values for {self.selected_metric}"
+            self._clear_last_axis_state()
             plot.update(self._last_plot_text)
             return
 
@@ -170,18 +181,33 @@ class PerRunPlotScreen(Screen[None]):
         width = max(int(container.size.width) - int(metrics_list.size.width) - 2, 30)
         height = max(int(container.size.height) - 1, 8)
         self._last_plot_dimensions = (width, height)
+        self._last_axis_unit = axis_unit
+        self._last_axis_label = "Step" if axis_unit == "step" else "Epoch"
+        self._last_x_values = xs
+        self._last_xticks = _distributed_ticks(xs, max_ticks=8)
+        self._last_yticks = [] if self.log_scale else _linear_ticks(ys, max_ticks=6)
 
         plt.clear_figure()
         plt.plotsize(width, height)
-        plt.theme("clear")
+        plt.theme("pro")
         plt.title(f"{self.exp.get('experiment_id', 'run')} - {self.selected_metric}")
-        plt.xlabel("epoch/step")
+        plt.xlabel(self._last_axis_label)
         plt.ylabel(self.selected_metric)
         plt.yscale("log" if self.log_scale else "linear")
-        plt.plot(xs, ys, label=self.selected_metric)
+        plt.grid(True, True)
+        if self._last_xticks:
+            plt.xticks(self._last_xticks)
+        if self._last_yticks:
+            plt.yticks(self._last_yticks)
+        plt.plot(xs, ys, marker="braille", label=self.selected_metric)
         if self.show_best_overlay:
             higher_better = self._higher_better(self.selected_metric)
-            plt.plot(xs, _running_best(ys, higher_better=higher_better), label=f"best({self.selected_metric})")
+            plt.plot(
+                xs,
+                _running_best(ys, higher_better=higher_better),
+                marker="braille",
+                label=f"best({self.selected_metric})",
+            )
         self._last_plot_text = plt.build()
         if not self._last_plot_text or not self._last_plot_text.strip():
             self._last_plot_text = (
@@ -190,6 +216,16 @@ class PerRunPlotScreen(Screen[None]):
             )
         plt.yscale("linear")
         plot.update(Text.from_ansi(self._last_plot_text))
+
+    def _resolve_progress_unit(self) -> ProgressAxisUnit:
+        return _resolve_progress_unit(self.history, self.exp)
+
+    def _clear_last_axis_state(self) -> None:
+        self._last_axis_unit = None
+        self._last_axis_label = ""
+        self._last_x_values = []
+        self._last_xticks = []
+        self._last_yticks = []
 
     def _higher_better(self, metric: str) -> bool:
         metric_info = self.exp.get("display_metric_info") or self.exp.get("metric_info") or {}
@@ -216,8 +252,77 @@ def _metric_item_id(metric: str) -> str:
     return f"metric-{safe}"
 
 
+def _resolve_progress_unit(history: list[dict[str, Any]], exp: dict[str, Any]) -> ProgressAxisUnit:
+    """Resolve the canonical plot x-axis without package-specific pseudo-epoch knowledge."""
+    history_unit = _unit_from_latest_history_entry(history)
+    if history_unit is not None:
+        return history_unit
+    exp_unit = _unit_from_experiment(exp)
+    if exp_unit is not None:
+        return exp_unit
+    return _infer_unit_from_history_shape(history)
+
+
+def _unit_from_latest_history_entry(history: list[dict[str, Any]]) -> ProgressAxisUnit | None:
+    for entry in reversed(history):
+        if not isinstance(entry, dict):
+            continue
+        unit = entry.get("unit")
+        if unit in ("epoch", "step"):
+            return unit
+    return None
+
+
+def _unit_from_experiment(exp: dict[str, Any]) -> ProgressAxisUnit | None:
+    progress = exp.get("progress")
+    if isinstance(progress, dict):
+        unit = progress.get("unit")
+        if unit in ("epoch", "step"):
+            return unit
+    for key in ("progress_unit", "unit"):
+        unit = exp.get(key)
+        if unit in ("epoch", "step"):
+            return unit
+    return None
+
+
+def _infer_unit_from_history_shape(history: list[dict[str, Any]]) -> ProgressAxisUnit:
+    step_values = _axis_values(history, "step")
+    epoch_values = _axis_values(history, "epoch")
+    if step_values and not epoch_values:
+        return "step"
+    if epoch_values and not step_values:
+        return "epoch"
+    if not step_values or not epoch_values:
+        return "epoch"
+
+    step_unique = len(set(step_values))
+    epoch_unique = len(set(epoch_values))
+    if step_unique > epoch_unique:
+        return "step"
+    if epoch_unique > step_unique:
+        return "epoch"
+
+    step_span = max(step_values) - min(step_values)
+    epoch_span = max(epoch_values) - min(epoch_values)
+    if step_span > max(epoch_span * 4.0, 20.0):
+        return "step"
+    return "epoch"
+
+
+def _axis_values(history: list[dict[str, Any]], key: str) -> list[float]:
+    values: list[float] = []
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        value = entry.get(key)
+        if _is_finite_number(value):
+            values.append(float(value))
+    return values
+
+
 def _series_for_metric(
-    history: list[dict[str, Any]], metric: str, *, log_scale: bool = False
+    history: list[dict[str, Any]], metric: str, *, unit: ProgressAxisUnit = "epoch", log_scale: bool = False
 ) -> list[tuple[float, float]]:
     points: list[tuple[float, float]] = []
     fallback_x = 1
@@ -231,14 +336,50 @@ def _series_for_metric(
         y = float(y_value)
         if log_scale and y <= 0.0:
             continue
-        x_value = entry.get("epoch")
-        if x_value is None:
-            x_value = entry.get("step")
+        x_value = _axis_value(entry, unit)
         if not _is_finite_number(x_value):
             x_value = fallback_x
         points.append((float(x_value), y))
         fallback_x += 1
     return points
+
+
+def _axis_value(entry: dict[str, Any], unit: ProgressAxisUnit) -> object:
+    primary = "step" if unit == "step" else "epoch"
+    secondary = "epoch" if unit == "step" else "step"
+    x_value = entry.get(primary)
+    if x_value is None:
+        x_value = entry.get(secondary)
+    return x_value
+
+
+def _distributed_ticks(values: list[float], *, max_ticks: int = 8, min_ticks: int = 2) -> list[float]:
+    if not values:
+        return []
+    if len(values) == 1:
+        return [values[0]]
+    n_ticks = min(max_ticks, max(min_ticks, len(values)))
+    indices = [round(index * (len(values) - 1) / (n_ticks - 1)) for index in range(n_ticks)]
+    ticks: list[float] = []
+    seen: set[float] = set()
+    for index in indices:
+        value = values[index]
+        if value in seen:
+            continue
+        seen.add(value)
+        ticks.append(value)
+    return ticks
+
+
+def _linear_ticks(values: list[float], *, max_ticks: int = 6) -> list[float]:
+    if not values:
+        return []
+    y_min = min(values)
+    y_max = max(values)
+    if y_max <= y_min:
+        return []
+    n_ticks = max(2, max_ticks)
+    return [y_min + (y_max - y_min) * index / (n_ticks - 1) for index in range(n_ticks)]
 
 
 def _running_best(values: list[float], *, higher_better: bool) -> list[float]:

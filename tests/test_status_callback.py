@@ -184,6 +184,7 @@ def test_status_callback_writes_one_history_line_per_epoch_for_fresh_run(tmp_pat
     history = read_history(callback)
     assert [entry.attempt for entry in history] == [1, 1]
     assert [entry.epoch for entry in history] == [1, 2]
+    assert [entry.unit for entry in history] == ["epoch", "epoch"]
     assert history[0].metrics == {"train/loss": 1.25, "val/acc": 0.5}
     assert history[1].metrics == {"train/loss": 0.75, "val/acc": 0.75}
     assert read_status(callback).attempt == 1
@@ -218,6 +219,7 @@ def test_status_callback_resume_increments_attempt_from_existing_history(tmp_pat
 
     history = read_history(callback)
     assert [entry.attempt for entry in history] == [1, 1, 2]
+    assert history[-1].unit == "epoch"
     assert history[-1].metrics == {"train/loss": 0.6}
     assert read_status(callback).attempt == 2
 
@@ -257,4 +259,5 @@ def test_status_callback_history_metric_hook_can_filter_metrics(tmp_path):
     callback.on_epoch_end(trainer, epoch=0, train_logs={"loss": 1.25}, val_logs={"acc": 0.5})
 
     history = read_history(callback)
+    assert history[0].unit == "epoch"
     assert history[0].metrics == {"val/acc": 0.5}
