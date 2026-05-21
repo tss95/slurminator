@@ -477,12 +477,13 @@ def _is_console_stream_handler(handler: logging.Handler) -> bool:
 
 
 def warn_if_incompatible_term() -> None:
-    """Log a hint for tmux TERM values known to break Textual resize handling."""
+    """Log a hint for tmux TERM values that may need resize fallback polling."""
     current_term = os.environ.get("TERM", "")
     if current_term in ("screen-256color", "screen", "") or current_term.startswith("screen-"):
         logger.warning(
-            "Detected TERM=%r. The v4 dashboard requires tmux-256color or "
-            "xterm-256color for correct resize handling. See "
+            "Detected TERM=%r. The v4 dashboard will use terminal-size polling "
+            "as a resize fallback. If rendering or resize handling is still "
+            "incorrect, use a dedicated tmux pane/session with tmux-256color. See "
             "docs/slurminator_ui_v4_phase4_decisions.md for setup instructions.",
             current_term or "<unset>",
         )

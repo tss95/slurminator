@@ -211,23 +211,43 @@ spec left room for implementation detail.
 
 ## Known Terminal Compatibility
 
-### tmux + TERM requirement
+### tmux + TERM compatibility
 
-The Textual dashboard requires `tmux-256color` (preferred) or at minimum
-`xterm-256color` to receive resize events and render correctly. The legacy
-`screen-256color` default that ships with most tmux installations causes the v4
-dashboard to skip resize handling. Users running tmux must add the following to
-`~/.tmux.conf`:
+The v4 dashboard uses app-side terminal-size polling as a fallback when tmux or
+SSH does not deliver resize events reliably. Because of that fallback, users do
+not need to change global tmux settings just to get the adaptive dashboard
+layout.
+
+Live review showed that forcing `tmux-256color`/RGB globally can make normal
+interactive shells redraw poorly, including readline history appearing
+additive while scrolling through commands. If that happens, revert the tmux
+changes, restart tmux, and keep the dashboard on the default `screen-256color`
+path. The dashboard will log a warning and use resize polling rather than
+refusing to start.
+
+For an already-running tmux server, removing the lines from `~/.tmux.conf` is
+not enough. Reset the live server:
+
+```bash
+tmux set-option -g default-terminal "screen-256color"
+tmux set-option -gu terminal-overrides
+```
+
+Existing panes keep the `TERM` value they launched with. Open a new pane/window,
+or restart the affected shell with `TERM=screen-256color exec bash -l`.
+
+If resize handling is still unreliable in a dedicated dashboard tmux
+session/pane, opt that session into `tmux-256color`:
 
 ```tmux
 set-option -g default-terminal "tmux-256color"
 set-option -ga terminal-overrides ",xterm-256color:RGB"
 ```
 
-After updating, restart tmux (`tmux kill-server && tmux`) or export
-`TERM=tmux-256color` inside the existing session before launching the
-dashboard. Verify with `echo $TERM`; it must show `tmux-256color` or
-`xterm-256color`, not `screen-256color`.
+After updating, restart tmux (`tmux kill-server && tmux`). Avoid exporting a
+different `TERM` in a long-lived shell unless it is a dedicated dashboard pane;
+mismatched tmux/TERM settings can break shell redraw even if the dashboard
+itself looks better.
 
 ### Outer terminal compatibility
 

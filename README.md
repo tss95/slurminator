@@ -75,10 +75,10 @@ Install the optional Textual dashboard v4 dependencies:
 python -m pip install -e "../slurminator[v4]"
 ```
 
-Dashboard v4 requires a modern terminal configuration. When running inside
-tmux, use `tmux-256color` or `xterm-256color`, not the legacy
-`screen-256color` default. See the
-[Dashboard v4 requirements](#dashboard-v4-requirements) section for details.
+Dashboard v4 works best in a modern terminal. It includes a resize polling
+fallback for tmux sessions that still use the legacy `screen-256color` default.
+See the [Dashboard v4 requirements](#dashboard-v4-requirements) section for
+details.
 
 Install from GitHub:
 
@@ -453,16 +453,34 @@ Phase 4 implementation decisions are tracked in
 
 ### Dashboard v4 Requirements
 
-If you run v4 inside tmux, configure tmux to use `tmux-256color`:
+The v4 dashboard includes a terminal-size polling fallback, so you do not need
+to change global tmux settings just to get the adaptive dashboard layout. If you
+already changed tmux and normal shell history/scrollback now behaves poorly,
+remove those tmux lines and reset the running tmux server:
+
+```bash
+tmux set-option -g default-terminal "screen-256color"
+tmux set-option -gu terminal-overrides
+```
+
+Then open a new pane/window, or restart the current shell with:
+
+```bash
+TERM=screen-256color exec bash -l
+```
+
+If resize handling is still unreliable in a dedicated dashboard tmux session,
+you can opt that session into `tmux-256color`:
 
 ```tmux
 set-option -g default-terminal "tmux-256color"
 set-option -ga terminal-overrides ",xterm-256color:RGB"
 ```
 
-Restart tmux with `tmux kill-server && tmux`, or export `TERM=tmux-256color`
-inside the current tmux session before launching the dashboard. Verify with
-`echo $TERM`; it should not be `screen-256color`.
+Restart tmux with `tmux kill-server && tmux` after changing `~/.tmux.conf`.
+Avoid exporting a different `TERM` in a long-lived shell unless you are using a
+dedicated dashboard pane; mismatched tmux/TERM settings can break readline
+redraw and make shell history appear additive while scrolling.
 
 On Windows, use Windows Terminal or another modern terminal emulator such as
 WezTerm rather than the legacy `powershell.exe` console host, which may not

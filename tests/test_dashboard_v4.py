@@ -645,7 +645,8 @@ def test_textual_dashboard_warns_for_screen_term(monkeypatch, caplog) -> None:
     TextualDashboardApp(refresh_interval=0.05)
 
     assert "Detected TERM='screen-256color'" in caplog.text
-    assert "tmux-256color or xterm-256color" in caplog.text
+    assert "terminal-size polling" in caplog.text
+    assert "dedicated tmux pane/session with tmux-256color" in caplog.text
     assert "docs/slurminator_ui_v4_phase4_decisions.md" in caplog.text
 
 
