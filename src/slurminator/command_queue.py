@@ -53,6 +53,7 @@ def default_command_handlers() -> dict[str, CommandHandler]:
         "cancel_all": handle_cancel_all,
         "relaunch_run": handle_relaunch_run,
         "update_run_settings": handle_update_run_settings,
+        "update_global_run_settings": handle_update_global_run_settings,
         "pause_submissions": handle_pause_submissions,
         "resume_submissions": handle_resume_submissions,
         "set_concurrency_limit": handle_set_concurrency_limit,
@@ -111,7 +112,8 @@ def handle_cancel_run(cmd: Command, ctx: CommandQueueContext) -> None:
 
 
 def handle_cancel_all(cmd: Command, ctx: CommandQueueContext) -> None:
-    """Cancel all queued or running experiments in the session."""
+    """Cancel active experiments and pause further submissions in the session."""
+    ctx.orchestrator.submissions_paused = True
     for exp in ctx.exps:
         if not _status_in(exp.get("status"), {ExperimentStatus.QUEUED, ExperimentStatus.RUNNING}):
             continue
@@ -163,6 +165,28 @@ def handle_update_run_settings(cmd: Command, ctx: CommandQueueContext) -> None:
     if not isinstance(settings, dict):
         raise ValueError("update_run_settings requires target.settings")
 
+    _apply_run_settings(exp, settings, updated_at=time.time())
+
+
+def handle_update_global_run_settings(cmd: Command, ctx: CommandQueueContext) -> None:
+    """Update settings for all runs whose next submission has not happened yet."""
+    settings = cmd.target.get("settings")
+    if not isinstance(settings, dict):
+        raise ValueError("update_global_run_settings requires target.settings")
+
+    scope = str(cmd.target.get("scope", "pending")).strip().lower()
+    if scope != "pending":
+        raise ValueError(f"unsupported global settings scope: {scope!r}")
+
+    updated_at = time.time()
+    for exp in ctx.exps:
+        if not _status_in(exp.get("status"), _NEXT_SUBMISSION_SETTINGS_STATUSES):
+            continue
+        _apply_run_settings(exp, settings, updated_at=updated_at)
+
+
+def _apply_run_settings(exp: dict[str, Any], settings: dict[str, Any], *, updated_at: float) -> None:
+    """Apply validated next-submission settings to one experiment row."""
     if "time_hours" in settings:
         time_hours = _coerce_optional_positive_int(settings["time_hours"], "time_hours")
         if time_hours is None:
@@ -187,7 +211,7 @@ def handle_update_run_settings(cmd: Command, ctx: CommandQueueContext) -> None:
         else:
             exp["pinned_hpc"] = pinned_hpc.value
 
-    exp["settings_updated_at"] = time.time()
+    exp["settings_updated_at"] = updated_at
 
 
 def handle_pause_submissions(cmd: Command, ctx: CommandQueueContext) -> None:
@@ -368,6 +392,7 @@ __all__ = [
     "handle_cancel_run",
     "handle_relaunch_run",
     "handle_update_run_settings",
+    "handle_update_global_run_settings",
     "handle_pause_submissions",
     "handle_resume_submissions",
     "handle_set_concurrency_limit",
@@ -384,6 +409,8 @@ _RELAUNCHABLE_STATUSES = {
     ExperimentStatus.OOM,
     ExperimentStatus.KILLED,
 }
+
+_NEXT_SUBMISSION_SETTINGS_STATUSES = {ExperimentStatus.PENDING, ExperimentStatus.PARTIAL}
 
 _RELAUNCH_RESET_FIELDS = {
     "job_id",

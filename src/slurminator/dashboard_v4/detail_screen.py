@@ -216,7 +216,7 @@ def _value(value: object) -> str:
 
 def _enum_value(value: object) -> str:
     if value == ExperimentStatus.CANCELLED:
-        return "canceled"
+        return "cancelled"
     if isinstance(value, Enum):
         return str(value.value)
     return _value(value)

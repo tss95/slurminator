@@ -41,13 +41,13 @@ class PerRunPlotScreen(Screen[None]):
             yield Static("", id="plot")
         yield Footer()
 
-    def on_mount(self) -> None:
+    async def on_mount(self) -> None:
         """Force-load history and draw the initial plot."""
         orchestrator = getattr(self.app, "orchestrator", None)
         if orchestrator is not None and hasattr(orchestrator, "force_read_full_history"):
             orchestrator.force_read_full_history(self.exp)
         self.history = list(self.exp.get("history") or [])
-        self._rebuild_metric_list()
+        await self._rebuild_metric_list()
         self.set_interval(getattr(self.app, "refresh_interval", 1.0), self.refresh_from_orchestrator)
         self.call_after_refresh(self._redraw_plot)
         self.query_one("#metrics", ListView).focus()
@@ -56,7 +56,7 @@ class PerRunPlotScreen(Screen[None]):
         """Regenerate the plot when the terminal layout changes."""
         self._redraw_plot()
 
-    def refresh_from_orchestrator(self) -> None:
+    async def refresh_from_orchestrator(self) -> None:
         """Refresh the plot from the latest app snapshot when history changes."""
         latest = self._latest_snapshot_exp()
         if latest is None:
@@ -68,7 +68,7 @@ class PerRunPlotScreen(Screen[None]):
             self.exp = latest
             self.history = latest_history
             previous_metric = self.selected_metric
-            self._rebuild_metric_list()
+            await self._rebuild_metric_list()
             if previous_metric in self.metric_keys:
                 self._set_selected_metric(previous_metric)
             self._redraw_plot()
@@ -107,15 +107,18 @@ class PerRunPlotScreen(Screen[None]):
                 return exp
         return None
 
-    def _rebuild_metric_list(self) -> None:
+    async def _rebuild_metric_list(self) -> None:
         self.metric_keys = _metric_keys(self.history)
         self._metric_by_item_id = {}
         metrics = self.query_one("#metrics", ListView)
-        metrics.clear()
+        await metrics.clear()
+        items: list[ListItem] = []
         for key in self.metric_keys:
             item_id = _metric_item_id(key)
             self._metric_by_item_id[item_id] = key
-            metrics.append(ListItem(Label(key), id=item_id))
+            items.append(ListItem(Label(key), id=item_id))
+        if items:
+            await metrics.extend(items)
         if self.metric_keys:
             if self.selected_metric not in self.metric_keys:
                 self.selected_metric = self.metric_keys[0]

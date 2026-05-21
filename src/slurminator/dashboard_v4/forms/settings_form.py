@@ -8,7 +8,7 @@ from typing import Any
 from textual.app import ComposeResult
 from textual.containers import Container
 from textual.screen import ModalScreen
-from textual.widgets import Input, Label, ListItem, ListView
+from textual.widgets import Button, Input, Label
 
 from slurminator.dashboard_v4.commands import submit_command
 
@@ -56,36 +56,46 @@ class SettingsFormScreen(ModalScreen[None]):
                 placeholder="blank = scheduler choice",
                 id="settings-pinned-hpc",
             ),
-            ListView(
-                ListItem(Label("Save settings"), id="save-settings"),
-                ListItem(Label("Clear overrides"), id="clear-settings"),
-                ListItem(Label("Return"), id="return"),
+            Container(
+                Button("Save settings", id="save-settings", variant="primary"),
+                Button("Clear overrides", id="clear-settings"),
+                Button("Return", id="return-settings"),
                 id="settings-actions",
             ),
             id="settings-form",
         )
 
-    def on_list_view_selected(self, event: ListView.Selected) -> None:
+    def on_button_pressed(self, event: Button.Pressed) -> None:
         """Dispatch selected settings action."""
-        if event.item.id == "save-settings":
-            submit_command(
-                self.app.command_save_path(),
-                "update_run_settings",
-                {"experiment_id": self.exp.get("experiment_id"), "settings": self._settings_payload()},
-            )
+        if event.button.id == "save-settings":
+            self._submit_settings()
+        elif event.button.id == "clear-settings":
+            self._clear_settings()
+        elif event.button.id == "return-settings":
             self.app.pop_screen()
-        elif event.item.id == "clear-settings":
-            submit_command(
-                self.app.command_save_path(),
-                "update_run_settings",
-                {
-                    "experiment_id": self.exp.get("experiment_id"),
-                    "settings": {"time_hours": None, "memory_gb": None, "gpu_count": None, "pinned_hpc": None},
-                },
-            )
-            self.app.pop_screen()
-        elif event.item.id == "return":
-            self.app.pop_screen()
+
+    def on_input_submitted(self, _event: Input.Submitted) -> None:
+        """Save settings when Enter is pressed in an editable field."""
+        self._submit_settings()
+
+    def _submit_settings(self) -> None:
+        submit_command(
+            self.app.command_save_path(),
+            "update_run_settings",
+            {"experiment_id": self.exp.get("experiment_id"), "settings": self._settings_payload()},
+        )
+        self.app.pop_screen()
+
+    def _clear_settings(self) -> None:
+        submit_command(
+            self.app.command_save_path(),
+            "update_run_settings",
+            {
+                "experiment_id": self.exp.get("experiment_id"),
+                "settings": {"time_hours": None, "memory_gb": None, "gpu_count": None, "pinned_hpc": None},
+            },
+        )
+        self.app.pop_screen()
 
     def _settings_payload(self) -> dict[str, str | None]:
         return {

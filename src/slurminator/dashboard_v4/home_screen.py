@@ -112,6 +112,10 @@ class HomeScreen(Screen[None]):
         self.app.sparkline_enabled = not bool(getattr(self.app, "sparkline_enabled", False))
         self.refresh_from_orchestrator()
 
+    def action_copy_experiment_id(self) -> None:
+        """Copy the dashboard experiment-list ID without leaving the home screen."""
+        self.app.copy_experiment_id()
+
     def action_quit(self) -> None:
         """Request a graceful dashboard and orchestrator shutdown."""
         self.app.request_dashboard_exit()

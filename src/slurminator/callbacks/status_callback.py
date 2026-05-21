@@ -362,12 +362,15 @@ class OrchestratorStatusCallback:
         """Append a history entry when a status write contains metrics."""
         if self.history_file is None or not status.metrics:
             return
+        metrics = self._history_metrics(status)
+        if not metrics:
+            return
         entry = HistoryEntry(
             timestamp=status.last_update,
             attempt=status.attempt,
             epoch=status.progress.current_epoch,
             step=status.progress.current_step,
-            metrics=dict(status.metrics),
+            metrics=metrics,
         )
         try:
             with self.history_file.open("a", encoding="utf-8") as handle:
@@ -375,6 +378,10 @@ class OrchestratorStatusCallback:
                 handle.write("\n")
         except Exception as exc:
             logger.debug("Failed to append history entry: %s", exc)
+
+    def _history_metrics(self, status: OrchestratorStatus) -> dict[str, float]:
+        """Return the metrics to append to the history file for this status."""
+        return dict(status.metrics)
 
     def _read_existing_state(self) -> StatusState | None:
         if self.status_file is None or not self.status_file.exists():

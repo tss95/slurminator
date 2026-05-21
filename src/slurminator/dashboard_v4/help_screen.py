@@ -37,11 +37,13 @@ Up/Down: move selection
 Enter: per-run menu
 g: global menu
 s: toggle sparkline
+y: copy experiment-list ID
 q: quit from home
 
 Global menu
 Pause/resume submissions
 Set concurrency limits
+Set Slurm overrides for pending runs
 Cancel active jobs
 
 Per-run menu

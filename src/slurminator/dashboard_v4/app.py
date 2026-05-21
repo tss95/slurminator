@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import base64
 import logging
 import os
 import signal
@@ -100,7 +101,7 @@ class TextualDashboardApp(App[None]):
     #global-menu {
         width: 52;
         height: auto;
-        max-height: 14;
+        max-height: 16;
         border: solid $accent;
         background: $surface;
         padding: 1 2;
@@ -162,6 +163,17 @@ class TextualDashboardApp(App[None]):
         margin-top: 1;
     }
 
+    #settings-actions {
+        layout: horizontal;
+        height: 3;
+        margin-top: 1;
+    }
+
+    #settings-actions Button {
+        width: 1fr;
+        margin-right: 1;
+    }
+
     #concurrency-form {
         width: 56;
         height: auto;
@@ -197,6 +209,39 @@ class TextualDashboardApp(App[None]):
     }
 
     #concurrency-buttons Button {
+        width: 1fr;
+        margin-right: 1;
+    }
+
+    #global-settings-form {
+        width: 64;
+        height: auto;
+        max-height: 21;
+        border: solid $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #global-settings-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #global-settings-message {
+        margin-bottom: 1;
+    }
+
+    .global-settings-field-label {
+        margin-top: 1;
+    }
+
+    #global-settings-actions {
+        layout: horizontal;
+        height: 3;
+        margin-top: 1;
+    }
+
+    #global-settings-actions Button {
         width: 1fr;
         margin-right: 1;
     }
@@ -271,7 +316,6 @@ class TextualDashboardApp(App[None]):
         self.title = app_title
         if LinuxDriver is not None and self.driver_class is LinuxDriver:
             self.driver_class = ThreadFriendlyLinuxDriver
-        warn_if_incompatible_term()
         self.n_recent = n_recent
         self.refresh_interval = refresh_interval
         self.ui_version = ui_version
@@ -334,6 +378,30 @@ class TextualDashboardApp(App[None]):
             if exp.get("save_path"):
                 return Path(str(exp["save_path"]))
         return Path.cwd()
+
+    def copy_experiment_id(self) -> None:
+        """Copy the dashboard experiment-list id through Textual's terminal clipboard path."""
+        experiment_id = self.dashboard_experiment_id()
+        if not experiment_id:
+            self.notify("No experiment ID to copy", severity="warning")
+            return
+        self.copy_to_clipboard(experiment_id)
+        write_tmux_clipboard_passthrough(self._driver, experiment_id)
+        self.notify(f"Copied experiment ID: {experiment_id}", timeout=2.0)
+
+    def dashboard_experiment_id(self) -> str | None:
+        """Return the dashboard-level experiment-list id, not a selected row id."""
+        orchestrator = self.orchestrator
+        exp_file = getattr(orchestrator, "experiment_file", None) if orchestrator is not None else None
+        if exp_file:
+            try:
+                experiment_id = Path(exp_file).stem
+            except TypeError:
+                experiment_id = str(exp_file)
+            experiment_id = experiment_id.strip()
+            if experiment_id:
+                return experiment_id
+        return None
 
     def request_dashboard_exit(self) -> None:
         """Request graceful shutdown of both Textual and the orchestrator loop."""
@@ -476,17 +544,21 @@ def _is_console_stream_handler(handler: logging.Handler) -> bool:
     return stream in {sys.stdout, sys.stderr, sys.__stdout__, sys.__stderr__}
 
 
-def warn_if_incompatible_term() -> None:
-    """Log a hint for tmux TERM values that may need resize fallback polling."""
-    current_term = os.environ.get("TERM", "")
-    if current_term in ("screen-256color", "screen", "") or current_term.startswith("screen-"):
-        logger.warning(
-            "Detected TERM=%r. The v4 dashboard will use terminal-size polling "
-            "as a resize fallback. If rendering or resize handling is still "
-            "incorrect, use a dedicated tmux pane/session with tmux-256color. See "
-            "docs/slurminator_ui_v4_phase4_decisions.md for setup instructions.",
-            current_term or "<unset>",
-        )
+def write_tmux_clipboard_passthrough(driver: Any, text: str) -> bool:
+    """Write an OSC 52 clipboard sequence wrapped for tmux passthrough."""
+    if not os.environ.get("TMUX") or driver is None:
+        return False
+    write = getattr(driver, "write", None)
+    if not callable(write):
+        return False
+    write(tmux_clipboard_passthrough_sequence(text))
+    return True
+
+
+def tmux_clipboard_passthrough_sequence(text: str) -> str:
+    """Return an OSC 52 clipboard sequence wrapped in tmux DCS passthrough."""
+    base64_text = base64.b64encode(text.encode("utf-8")).decode("utf-8")
+    return f"\x1bPtmux;\x1b\x1b]52;c;{base64_text}\a\x1b\\"
 
 
 __all__ = ["TextualDashboardApp"]

@@ -222,8 +222,8 @@ Live review showed that forcing `tmux-256color`/RGB globally can make normal
 interactive shells redraw poorly, including readline history appearing
 additive while scrolling through commands. If that happens, revert the tmux
 changes, restart tmux, and keep the dashboard on the default `screen-256color`
-path. The dashboard will log a warning and use resize polling rather than
-refusing to start.
+path. The dashboard uses resize polling rather than refusing to start or logging
+a TERM compatibility warning.
 
 For an already-running tmux server, removing the lines from `~/.tmux.conf` is
 not enough. Reset the live server:
@@ -248,6 +248,35 @@ After updating, restart tmux (`tmux kill-server && tmux`). Avoid exporting a
 different `TERM` in a long-lived shell unless it is a dedicated dashboard pane;
 mismatched tmux/TERM settings can break shell redraw even if the dashboard
 itself looks better.
+
+### tmux + clipboard compatibility
+
+The v4 dashboard's copy actions use OSC 52 terminal clipboard sequences.
+Slurminator writes both the normal Textual OSC 52 sequence and, when `$TMUX` is
+set, a tmux DCS passthrough-wrapped OSC 52 sequence. This preserves mouse
+support in the dashboard while giving users a deterministic way to copy the
+dashboard experiment-list ID, such as `experiments_20260521_133111`.
+
+tmux must still be configured to forward clipboard sequences to the outer
+terminal. For the current tmux server:
+
+```bash
+tmux set-option -g set-clipboard on
+tmux set-option -g allow-passthrough on
+```
+
+For persistent setup in `~/.tmux.conf`:
+
+```tmux
+set-option -g set-clipboard on
+set-option -g allow-passthrough on
+```
+
+These clipboard settings are independent of the `TERM`/resize settings above
+and should not require switching the session to `tmux-256color`. The outer
+terminal must also allow OSC 52 clipboard writes. Windows Terminal and WezTerm
+support this path; some terminal emulators, SSH clients, or managed terminal
+policies may block it.
 
 ### Outer terminal compatibility
 

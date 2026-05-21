@@ -13,14 +13,20 @@ import pytest
 from rich.text import Text
 from textual import events
 from textual.css.query import NoMatches
-from textual.widgets import Button, Input, Label
+from textual.widgets import Button, Input, Label, ListView
 
 from slurminator.command_queue import Command
 from slurminator.config import HPCType
-from slurminator.dashboard_v4.app import TextualDashboardApp, suppress_thread_signal_registration
+from slurminator.dashboard_v4.app import (
+    TextualDashboardApp,
+    suppress_thread_signal_registration,
+    tmux_clipboard_passthrough_sequence,
+    write_tmux_clipboard_passthrough,
+)
 from slurminator.dashboard_v4.commands import submit_command
 from slurminator.dashboard_v4.detail_screen import PerRunDetailScreen
 from slurminator.dashboard_v4.forms.concurrency_form import ConcurrencyFormScreen
+from slurminator.dashboard_v4.forms.global_settings_form import GlobalSettingsFormScreen
 from slurminator.dashboard_v4.forms.relaunch_form import RelaunchFormScreen
 from slurminator.dashboard_v4.forms.settings_form import SettingsFormScreen
 from slurminator.dashboard_v4.global_menu import GlobalMenuScreen
@@ -80,9 +86,11 @@ class FakeConnection:
         return ""
 
 
-def _orchestrator(tmp_path: Path, connection: FakeConnection | None = None) -> HPCOrchestrator:
+def _orchestrator(
+    tmp_path: Path, connection: FakeConnection | None = None, experiment_file_name: str = "experiments.yaml"
+) -> HPCOrchestrator:
     tmp_path.mkdir(parents=True, exist_ok=True)
-    exp_file = tmp_path / "experiments.yaml"
+    exp_file = tmp_path / experiment_file_name
     exp_file.write_text("experiments: []\n", encoding="utf-8")
     return HPCOrchestrator(
         str(exp_file),
@@ -298,6 +306,31 @@ def test_textual_home_table_uses_status_colors_metric_colors_and_v3_order(tmp_pa
     asyncio.run(run())
 
 
+def test_textual_cancelled_status_uses_double_l_spelling(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        exp = dict(_experiments()[0])
+        exp["status"] = ExperimentStatus.CANCELLED
+        orch._publish_dashboard_snapshot([exp])
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.pause(0.2)
+            status_cell = app.screen.query_one(ExperimentsTable).get_row_at(0)[3]
+            assert isinstance(status_cell, Text)
+            assert status_cell.plain == "CANCELLED"
+            assert status_cell.style == "bold red"
+
+            await app.push_screen(PerRunDetailScreen(exp))
+            await pilot.pause(0.1)
+            detail_text = app.screen._last_detail_text
+            assert "status: cancelled" in detail_text
+            assert "status: canceled" not in detail_text
+
+    asyncio.run(run())
+
+
 def test_textual_home_table_renders_sparkline_and_toggles_column(tmp_path: Path) -> None:
     async def run() -> None:
         orch = _orchestrator(tmp_path)
@@ -435,7 +468,7 @@ def test_textual_global_menu_cancel_all_writes_command(tmp_path: Path) -> None:
             await pilot.pause(0.2)
             await pilot.press("g")
             actions = app.screen.query_one("#global-actions")
-            actions.index = 2
+            actions.index = 3
             await pilot.press("enter")
             await pilot.pause(0.1)
             commands = _pending_commands(tmp_path)
@@ -461,6 +494,7 @@ def test_textual_global_menu_concurrency_form_writes_limit_commands(tmp_path: Pa
             assert [child.id for child in global_actions.children] == [
                 "toggle-submissions",
                 "set-concurrency",
+                "set-global-settings",
                 "cancel-all",
                 "help",
                 "close-global-menu",
@@ -480,6 +514,64 @@ def test_textual_global_menu_concurrency_form_writes_limit_commands(tmp_path: Pa
             assert commands[0].target == {"hpc": "OLIVIA", "limit": 3}
             assert orch._process_command_queue(_experiments()) == 1
             assert orch.concurrency_limits[HPCType.OLIVIA] == 3
+
+    asyncio.run(run())
+
+
+def test_textual_global_settings_form_writes_update_command(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        orch._publish_dashboard_snapshot(_experiments())
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("g")
+            await pilot.pause(0.1)
+            global_actions = app.screen.query_one("#global-actions")
+            global_actions.index = 2
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, GlobalSettingsFormScreen)
+
+            app.screen.query_one("#global-settings-time-hours", Input).value = "8"
+            app.screen.query_one("#global-settings-memory-gb", Input).value = "220"
+            app.screen.query_one("#global-settings-gpu-count", Input).value = "2"
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+
+            commands = _pending_commands(tmp_path)
+            assert len(commands) == 1
+            assert commands[0].action == "update_global_run_settings"
+            assert commands[0].target == {
+                "scope": "pending",
+                "settings": {"time_hours": "8", "memory_gb": "220", "gpu_count": "2"},
+            }
+
+    asyncio.run(run())
+
+
+def test_textual_global_settings_form_clear_writes_clear_command(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await app.push_screen(GlobalSettingsFormScreen())
+            await pilot.pause(0.1)
+            app.screen.query_one("#clear-global-settings", Button).focus()
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+
+            commands = _pending_commands(tmp_path)
+            assert len(commands) == 1
+            assert commands[0].action == "update_global_run_settings"
+            assert commands[0].target == {
+                "scope": "pending",
+                "settings": {"time_hours": None, "memory_gb": None, "gpu_count": None},
+            }
 
     asyncio.run(run())
 
@@ -567,11 +659,12 @@ def test_textual_help_opens_from_question_mark_and_global_menu(tmp_path: Path) -
             await pilot.press("g")
             await pilot.pause(0.1)
             global_actions = app.screen.query_one("#global-actions")
-            global_actions.index = 3
+            global_actions.index = 4
             await pilot.press("enter")
             await pilot.pause(0.1)
             assert isinstance(app.screen, HelpScreen)
             assert "Set concurrency limits" in str(app.screen.query_one("#help-content").render())
+            assert "Set Slurm overrides" in str(app.screen.query_one("#help-content").render())
 
     asyncio.run(run())
 
@@ -638,16 +731,14 @@ def test_textual_dashboard_mount_quiets_console_logs(tmp_path: Path) -> None:
         logger.setLevel(previous_level)
 
 
-def test_textual_dashboard_warns_for_screen_term(monkeypatch, caplog) -> None:
+def test_textual_dashboard_does_not_warn_for_screen_term(monkeypatch, caplog) -> None:
     monkeypatch.setenv("TERM", "screen-256color")
     caplog.set_level(logging.WARNING, logger="slurminator")
 
     TextualDashboardApp(refresh_interval=0.05)
 
-    assert "Detected TERM='screen-256color'" in caplog.text
-    assert "terminal-size polling" in caplog.text
-    assert "dedicated tmux pane/session with tmux-256color" in caplog.text
-    assert "docs/slurminator_ui_v4_phase4_decisions.md" in caplog.text
+    assert "Detected TERM=" not in caplog.text
+    assert "terminal-size polling" not in caplog.text
 
 
 def test_textual_dashboard_does_not_warn_for_tmux_term(monkeypatch, caplog) -> None:
@@ -797,6 +888,48 @@ def test_textual_per_run_menu_labels_cancel_and_return_actions(tmp_path: Path) -
             assert _pending_commands(tmp_path) == []
 
     asyncio.run(run())
+
+
+def test_textual_home_y_copies_dashboard_experiment_id(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path, experiment_file_name="experiments_20260521_133111.yaml")
+        orch._publish_dashboard_snapshot(_experiments())
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 36)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("down")
+            await pilot.press("y")
+            await pilot.pause(0.1)
+
+            assert app.clipboard == "experiments_20260521_133111"
+
+    asyncio.run(run())
+
+
+def test_tmux_clipboard_passthrough_sequence_wraps_osc52() -> None:
+    sequence = tmux_clipboard_passthrough_sequence("exp-1")
+
+    assert sequence == "\x1bPtmux;\x1b\x1b]52;c;ZXhwLTE=\a\x1b\\"
+
+
+def test_tmux_clipboard_passthrough_only_writes_inside_tmux(monkeypatch) -> None:
+    class FakeDriver:
+        def __init__(self) -> None:
+            self.writes: list[str] = []
+
+        def write(self, text: str) -> None:
+            self.writes.append(text)
+
+    driver = FakeDriver()
+    monkeypatch.delenv("TMUX", raising=False)
+    assert write_tmux_clipboard_passthrough(driver, "exp-1") is False
+    assert driver.writes == []
+
+    monkeypatch.setenv("TMUX", "/tmp/tmux-123/default,456,0")
+    assert write_tmux_clipboard_passthrough(driver, "exp-1") is True
+    assert driver.writes == [tmux_clipboard_passthrough_sequence("exp-1")]
 
 
 def test_textual_per_run_menu_opens_plot_screen_for_selected_run(tmp_path: Path) -> None:
@@ -963,14 +1096,12 @@ def test_textual_per_run_menu_settings_writes_update_command(tmp_path: Path) -> 
             assert app.screen.query_one("#settings-memory-gb", Input).value == "120"
             assert app.screen.query_one("#settings-gpu-count", Input).value == "1"
             assert app.screen.query_one("#settings-pinned-hpc", Input).value == "FOX"
+            assert app.screen.query_one("#save-settings", Button).label.plain == "Save settings"
 
             app.screen.query_one("#settings-time-hours", Input).value = "8"
             app.screen.query_one("#settings-memory-gb", Input).value = "240"
             app.screen.query_one("#settings-gpu-count", Input).value = "2"
             app.screen.query_one("#settings-pinned-hpc", Input).value = "OLIVIA"
-            settings_actions = app.screen.query_one("#settings-actions")
-            settings_actions.index = 0
-            settings_actions.focus()
             await pilot.press("enter")
             await pilot.pause(0.1)
 
@@ -998,9 +1129,7 @@ def test_textual_settings_form_clear_overrides_writes_clear_command(tmp_path: Pa
         async with app.run_test(size=(120, 40)) as pilot:
             await app.push_screen(SettingsFormScreen(exp))
             await pilot.pause(0.1)
-            settings_actions = app.screen.query_one("#settings-actions")
-            settings_actions.index = 1
-            settings_actions.focus()
+            app.screen.query_one("#clear-settings", Button).focus()
             await pilot.press("enter")
             await pilot.pause(0.1)
 
@@ -1188,6 +1317,34 @@ def test_textual_plot_screen_renders_metrics_and_toggles(tmp_path: Path) -> None
             assert screen.show_best_overlay is True
             assert screen._higher_better("loss") is False
             assert "best(loss)" in screen._last_plot_text
+
+    asyncio.run(run())
+
+
+def test_textual_plot_screen_rebuilds_metric_list_without_duplicate_ids(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        exp = _experiments()[0]
+        orch._publish_dashboard_snapshot([exp])
+        app = TextualDashboardApp(refresh_interval=10.0)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 36)) as pilot:
+            await app.push_screen(PerRunPlotScreen(exp))
+            await pilot.pause(0.2)
+            screen = app.screen
+            assert isinstance(screen, PerRunPlotScreen)
+
+            updated = dict(exp)
+            updated["history"] = [*exp["history"], _history_line(epoch=3, loss=0.7, acc=0.65)]
+            orch._publish_dashboard_snapshot([updated])
+            await screen.refresh_from_orchestrator()
+            await screen.refresh_from_orchestrator()
+            await pilot.pause(0.1)
+
+            metrics = screen.query_one("#metrics", ListView)
+            assert [item.id for item in metrics.children] == ["metric-acc", "metric-loss"]
+            assert screen.metric_keys == ["acc", "loss"]
 
     asyncio.run(run())
 

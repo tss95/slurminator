@@ -12,6 +12,7 @@ from slurminator.command_queue import (
     handle_cancel_run,
     handle_relaunch_run,
     handle_update_run_settings,
+    handle_update_global_run_settings,
     handle_pause_submissions,
     handle_resume_submissions,
     handle_set_concurrency_limit,
@@ -91,14 +92,19 @@ def test_handle_cancel_run_ignores_inactive_or_missing_run(tmp_path) -> None:
 
 def test_handle_cancel_all_issues_scancel_for_all_active_runs(tmp_path) -> None:
     connection = FakeConnection()
+    orchestrator = SimpleNamespace(submissions_paused=False, concurrency_limits={})
     exps = [
         {"experiment_id": "queued", "status": "queued", "hpc_assignment": "olivia", "job_id": "1"},
         {"experiment_id": "running", "status": ExperimentStatus.RUNNING, "hpc_assignment": HPCType.FOX, "job_id": "2"},
         {"experiment_id": "done", "status": ExperimentStatus.COMPLETED, "hpc_assignment": HPCType.FOX, "job_id": "3"},
     ]
 
-    handle_cancel_all(_command("cancel_all", {"scope": "session"}), _context(tmp_path, exps, connection=connection))
+    handle_cancel_all(
+        _command("cancel_all", {"scope": "session"}),
+        _context(tmp_path, exps, orchestrator=orchestrator, connection=connection),
+    )
 
+    assert orchestrator.submissions_paused is True
     assert connection.commands == [(HPCType.OLIVIA, "scancel 1", True), (HPCType.FOX, "scancel 2", True)]
 
 
@@ -253,6 +259,65 @@ def test_handle_update_run_settings_rejects_invalid_values(tmp_path) -> None:
             _command("update_run_settings", {"experiment_id": "exp-1", "settings": {"pinned_hpc": "UNKNOWN"}}),
             _context(tmp_path, [exp]),
         )
+
+
+def test_handle_update_global_run_settings_updates_pending_next_submissions(tmp_path) -> None:
+    exps = [
+        {"experiment_id": "pending", "status": ExperimentStatus.PENDING},
+        {"experiment_id": "partial", "status": ExperimentStatus.PARTIAL, "resource_overrides": {"memory_gb": 80}},
+        {"experiment_id": "queued", "status": ExperimentStatus.QUEUED},
+        {"experiment_id": "running", "status": ExperimentStatus.RUNNING},
+        {"experiment_id": "failed", "status": ExperimentStatus.FAILED},
+    ]
+
+    handle_update_global_run_settings(
+        _command(
+            "update_global_run_settings",
+            {"scope": "pending", "settings": {"time_hours": "8", "memory_gb": "220", "gpu_count": "2"}},
+        ),
+        _context(tmp_path, exps),
+    )
+
+    for exp in exps[:2]:
+        assert exp["time_hours_override"] == 8
+        assert exp["resource_overrides"] == {"memory_gb": 220, "gpu_count": 2}
+        assert isinstance(exp["settings_updated_at"], float)
+    for exp in exps[2:]:
+        assert "time_hours_override" not in exp
+        assert "resource_overrides" not in exp
+        assert "settings_updated_at" not in exp
+
+
+def test_handle_update_global_run_settings_clears_pending_overrides(tmp_path) -> None:
+    exps = [
+        {
+            "experiment_id": "pending",
+            "status": ExperimentStatus.PENDING,
+            "time_hours_override": 8,
+            "resource_overrides": {"memory_gb": 220, "gpu_count": 2},
+        },
+        {
+            "experiment_id": "queued",
+            "status": ExperimentStatus.QUEUED,
+            "time_hours_override": 8,
+            "resource_overrides": {"memory_gb": 220, "gpu_count": 2},
+        },
+    ]
+
+    handle_update_global_run_settings(
+        _command(
+            "update_global_run_settings",
+            {"scope": "pending", "settings": {"time_hours": None, "memory_gb": None, "gpu_count": None}},
+        ),
+        _context(tmp_path, exps),
+    )
+
+    assert "time_hours_override" not in exps[0]
+    assert "resource_overrides" not in exps[0]
+    assert isinstance(exps[0]["settings_updated_at"], float)
+    assert exps[1]["time_hours_override"] == 8
+    assert exps[1]["resource_overrides"] == {"memory_gb": 220, "gpu_count": 2}
+    assert "settings_updated_at" not in exps[1]
 
 
 def test_pause_and_resume_submission_handlers_are_idempotent(tmp_path) -> None:

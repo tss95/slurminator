@@ -239,3 +239,22 @@ def test_status_callback_history_append_uses_status_write_throttle(tmp_path):
     callback.on_train_batch_end(trainer, batch=None, batch_idx=0, logs={})
 
     assert len(read_history(callback)) == 1
+
+
+def test_status_callback_history_metric_hook_can_filter_metrics(tmp_path):
+    class FilteredHistoryCallback(OrchestratorStatusCallback):
+        def _history_metrics(self, status: OrchestratorStatus) -> dict[str, float]:
+            return {key: value for key, value in status.metrics.items() if key == "val/acc"}
+
+    clock = FakeClock()
+    cfg = make_cfg()
+    trainer = DummyTrainer(cfg)
+    callback = FilteredHistoryCallback(
+        cfg=cfg, save_path=tmp_path, job_id="12345", min_write_interval_seconds=0.0, time_fn=clock
+    )
+
+    callback.on_train_start(trainer)
+    callback.on_epoch_end(trainer, epoch=0, train_logs={"loss": 1.25}, val_logs={"acc": 0.5})
+
+    history = read_history(callback)
+    assert history[0].metrics == {"val/acc": 0.5}

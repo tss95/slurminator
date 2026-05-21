@@ -8,6 +8,7 @@ HOME_BINDINGS = [
     Binding("enter", "drill_in", "Drill in"),
     Binding("g", "app.global_menu", "Global"),
     Binding("s", "toggle_sparkline", "Sparkline"),
+    Binding("y", "copy_experiment_id", "Copy ID"),
     Binding("q", "quit", "Quit"),
     Binding("escape", "noop", "", show=False),
 ]

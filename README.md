@@ -482,6 +482,28 @@ Avoid exporting a different `TERM` in a long-lived shell unless you are using a
 dedicated dashboard pane; mismatched tmux/TERM settings can break readline
 redraw and make shell history appear additive while scrolling.
 
+Clipboard copy in v4 uses OSC 52. Slurminator emits both a normal OSC 52 copy
+sequence and a tmux-wrapped passthrough sequence, but tmux must be configured to
+forward clipboard sequences to the outer terminal. To enable this for the
+current tmux server:
+
+```bash
+tmux set-option -g set-clipboard on
+tmux set-option -g allow-passthrough on
+```
+
+For persistent setup, add the same options to `~/.tmux.conf`:
+
+```tmux
+set-option -g set-clipboard on
+set-option -g allow-passthrough on
+```
+
+These clipboard settings are independent of the `TERM`/resize settings above
+and should not require switching to `tmux-256color`. The outer terminal must
+also allow OSC 52 clipboard writes; Windows Terminal and WezTerm do, while some
+terminal emulators or managed SSH clients may block them by policy.
+
 On Windows, use Windows Terminal or another modern terminal emulator such as
 WezTerm rather than the legacy `powershell.exe` console host, which may not
 propagate resize events through SSH reliably. See
