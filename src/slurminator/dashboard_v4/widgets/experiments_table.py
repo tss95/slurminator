@@ -115,6 +115,8 @@ def _format_status(value: object) -> str | Text:
     text = _format_enum(value)
     label = text.upper() if text != "-" else text
     status = value if isinstance(value, ExperimentStatus) else None
+    if status == ExperimentStatus.CANCELLED:
+        label = "CANCELED"
     style = {
         ExperimentStatus.PENDING: "cyan",
         ExperimentStatus.PARTIAL: "yellow",

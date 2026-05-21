@@ -13,7 +13,7 @@ import pytest
 from rich.text import Text
 from textual import events
 from textual.css.query import NoMatches
-from textual.widgets import Input, Label
+from textual.widgets import Button, Input, Label
 
 from slurminator.command_queue import Command
 from slurminator.config import HPCType
@@ -786,6 +786,7 @@ def test_textual_per_run_menu_labels_cancel_and_return_actions(tmp_path: Path) -
                 "return",
             ]
             assert actions.children[3].query_one(Label).content == "Cancel selected run"
+            assert actions.children[4].query_one(Label).content == "Relaunch run"
             assert actions.children[-1].query_one(Label).content == "Return"
 
             actions.index = 6
@@ -901,7 +902,31 @@ def test_textual_per_run_menu_relaunch_writes_relaunch_command(tmp_path: Path) -
             await pilot.press("enter")
             await pilot.pause(0.1)
             assert isinstance(app.screen, RelaunchFormScreen)
-            assert app.screen.query_one("#relaunch-actions").children[0].id == "confirm-relaunch"
+            assert app.screen.query_one("#confirm-relaunch", Button).disabled is False
+
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+
+            commands = _pending_commands(tmp_path)
+            assert len(commands) == 1
+            assert commands[0].action == "relaunch_run"
+            assert commands[0].target == {"experiment_id": "exp-1", "job_id": "12345"}
+
+    asyncio.run(run())
+
+
+def test_textual_relaunch_form_accepts_canceled_status(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+        exp = dict(_experiments()[0])
+        exp["status"] = "CANCELED"
+
+        async with app.run_test(size=(120, 36)) as pilot:
+            await app.push_screen(RelaunchFormScreen(exp))
+            await pilot.pause(0.1)
+            assert app.screen.query_one("#confirm-relaunch", Button).disabled is False
 
             await pilot.press("enter")
             await pilot.pause(0.1)
@@ -998,8 +1023,7 @@ def test_textual_relaunch_form_blocks_active_run_confirmation(tmp_path: Path) ->
         async with app.run_test(size=(120, 36)) as pilot:
             await app.push_screen(RelaunchFormScreen(_experiments()[0]))
             await pilot.pause(0.1)
-            actions = app.screen.query_one("#relaunch-actions")
-            assert [child.id for child in actions.children] == ["back"]
+            assert app.screen.query_one("#confirm-relaunch", Button).disabled is True
 
             await pilot.press("enter")
             await pilot.pause(0.1)

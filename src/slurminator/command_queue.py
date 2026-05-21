@@ -247,11 +247,14 @@ def _coerce_status(status: object) -> ExperimentStatus | None:
     text = str(status).strip()
     if text.startswith("ExperimentStatus."):
         text = text.split(".", 1)[1]
+    normalized = text.upper().rstrip("+*")
+    if normalized.startswith("CANCELED") or normalized.startswith("CANCELLED"):
+        return ExperimentStatus.CANCELLED
     try:
         return ExperimentStatus(text)
     except ValueError:
         try:
-            return ExperimentStatus[text.upper()]
+            return ExperimentStatus[normalized]
         except KeyError:
             return None
 

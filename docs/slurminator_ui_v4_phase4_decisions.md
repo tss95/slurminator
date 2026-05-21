@@ -202,6 +202,12 @@ spec left room for implementation detail.
   metric key, the display shortform, and finally the available history metric
   keys. Live runs exposed that exact-only lookup could leave the trajectory
   blank even when the history file contained metric points.
+- Live PMT review also exposed the opposite failure mode: no history files at
+  all because Slurm jobs inherited `PMT_ENV_LOADED=1` from the launcher and
+  `step_0.sh` could early-return inside `universal_job.sh`. PMT's job wrapper
+  now forces `PMT_FORCE_RELOAD=1` when sourcing the env script so newly
+  submitted jobs pick up the sibling Slurminator source and write schema v1.1
+  status/history files.
 
 ## Known Terminal Compatibility
 

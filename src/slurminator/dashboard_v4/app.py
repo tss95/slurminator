@@ -129,6 +129,17 @@ class TextualDashboardApp(App[None]):
         margin-bottom: 1;
     }
 
+    #relaunch-buttons {
+        layout: horizontal;
+        height: 3;
+        margin-top: 1;
+    }
+
+    #relaunch-buttons Button {
+        width: 1fr;
+        margin-right: 1;
+    }
+
     #settings-form {
         width: 64;
         height: auto;

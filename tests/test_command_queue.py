@@ -142,6 +142,18 @@ def test_handle_relaunch_run_resets_terminal_experiment_for_submission(tmp_path)
         assert key not in exp
 
 
+def test_handle_relaunch_run_accepts_canceled_status_alias(tmp_path) -> None:
+    exp = {"experiment_id": "exp-1", "status": "CANCELED by 12345", "hpc_assignment": HPCType.OLIVIA, "job_id": "12345"}
+
+    handle_relaunch_run(
+        _command("relaunch_run", {"experiment_id": "exp-1", "job_id": "12345"}), _context(tmp_path, [exp])
+    )
+
+    assert exp["status"] == ExperimentStatus.PENDING
+    assert exp["relaunch_previous_status"] == "cancelled"
+    assert exp["relaunch_source_job_id"] == "12345"
+
+
 def test_handle_relaunch_run_rejects_active_experiment(tmp_path) -> None:
     exp = {
         "experiment_id": "exp-1",

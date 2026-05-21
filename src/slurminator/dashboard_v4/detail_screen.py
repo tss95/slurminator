@@ -13,6 +13,7 @@ from textual.screen import Screen
 from textual.widgets import Footer, Header, Static
 
 from slurminator.dashboard_v4.keystrokes import DETAIL_BINDINGS
+from slurminator.experiments import ExperimentStatus
 
 
 class PerRunDetailScreen(Screen[None]):
@@ -214,6 +215,8 @@ def _value(value: object) -> str:
 
 
 def _enum_value(value: object) -> str:
+    if value == ExperimentStatus.CANCELLED:
+        return "canceled"
     if isinstance(value, Enum):
         return str(value.value)
     return _value(value)
