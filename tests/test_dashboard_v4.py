@@ -23,6 +23,7 @@ from slurminator.dashboard_v4.forms.relaunch_form import RelaunchFormScreen
 from slurminator.dashboard_v4.forms.settings_form import SettingsFormScreen
 from slurminator.dashboard_v4.global_menu import GlobalMenuScreen
 from slurminator.dashboard_v4.log_screen import PerRunLogScreen
+from slurminator.dashboard_v4 import plot_screen as plot_screen_module
 from slurminator.dashboard_v4.per_run_menu import PerRunMenuScreen
 from slurminator.dashboard_v4.plot_screen import PerRunPlotScreen
 from slurminator.dashboard_v4.widgets.sparkline import render_sparkline, slope_color
@@ -973,6 +974,88 @@ def test_textual_plot_screen_renders_metrics_and_toggles(tmp_path: Path) -> None
             assert screen.show_best_overlay is True
             assert screen._higher_better("loss") is False
             assert "best(loss)" in screen._last_plot_text
+
+    asyncio.run(run())
+
+
+def test_textual_plot_screen_defers_initial_draw_until_after_refresh(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+        monkeypatch.setattr(PerRunPlotScreen, "on_resize", lambda _self, _event: None)
+        monkeypatch.setattr(PerRunPlotScreen, "on_list_view_highlighted", lambda _self, _event: None)
+        exp = dict(_experiments()[0])
+        exp.pop("job_id", None)
+        screen = PerRunPlotScreen(exp)
+        callbacks: list[object] = []
+        redraws: list[str] = []
+        original_redraw = screen._redraw_plot
+
+        def fake_call_after_refresh(callback, *args, **kwargs) -> None:  # noqa: ANN001, ANN002, ANN003
+            callbacks.append(callback)
+
+        def spy_redraw() -> None:
+            redraws.append("redraw")
+            original_redraw()
+
+        monkeypatch.setattr(screen, "call_after_refresh", fake_call_after_refresh)
+        monkeypatch.setattr(screen, "_redraw_plot", spy_redraw)
+
+        async with app.run_test(size=(120, 36)):
+            await app.push_screen(screen)
+            assert callbacks[-1] == spy_redraw
+            assert redraws == []
+            callbacks[-1]()
+            assert redraws == ["redraw"]
+            assert "exp-1 - acc" in screen._last_plot_text
+
+    asyncio.run(run())
+
+
+def test_textual_plot_screen_resize_redraws_at_new_dimensions(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        orch._publish_dashboard_snapshot(_experiments())
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 36)) as pilot:
+            await app.push_screen(PerRunPlotScreen(_experiments()[0]))
+            await pilot.pause(0.3)
+            screen = app.screen
+            assert isinstance(screen, PerRunPlotScreen)
+            initial_dimensions = screen._last_plot_dimensions
+            assert initial_dimensions is not None
+
+            await pilot.resize_terminal(140, 40)
+            await pilot.pause(0.2)
+
+            resized_dimensions = screen._last_plot_dimensions
+            assert resized_dimensions is not None
+            assert resized_dimensions[0] > initial_dimensions[0]
+            assert resized_dimensions[1] >= initial_dimensions[1]
+            assert "exp-1 - acc" in screen._last_plot_text
+
+    asyncio.run(run())
+
+
+def test_textual_plot_screen_empty_plotext_output_reports_failure(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+        exp = dict(_experiments()[0])
+        exp.pop("job_id", None)
+        monkeypatch.setattr(plot_screen_module.plt, "build", lambda: "")
+
+        async with app.run_test(size=(120, 36)) as pilot:
+            await app.push_screen(PerRunPlotScreen(exp))
+            await pilot.pause(0.3)
+            screen = app.screen
+            assert isinstance(screen, PerRunPlotScreen)
+            assert "plotext build returned empty output for acc" in screen._last_plot_text
+            assert "points: 2" in screen._last_plot_text
 
     asyncio.run(run())
 

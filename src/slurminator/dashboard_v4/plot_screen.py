@@ -7,6 +7,7 @@ from typing import Any
 
 import plotext as plt
 from rich.text import Text
+from textual import events
 from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.screen import Screen
@@ -29,6 +30,7 @@ class PerRunPlotScreen(Screen[None]):
         self.log_scale = False
         self.show_best_overlay = False
         self._last_plot_text = ""
+        self._last_plot_dimensions: tuple[int, int] | None = None
         self._metric_by_item_id: dict[str, str] = {}
 
     def compose(self) -> ComposeResult:
@@ -47,8 +49,12 @@ class PerRunPlotScreen(Screen[None]):
         self.history = list(self.exp.get("history") or [])
         self._rebuild_metric_list()
         self.set_interval(getattr(self.app, "refresh_interval", 1.0), self.refresh_from_orchestrator)
-        self._redraw_plot()
+        self.call_after_refresh(self._redraw_plot)
         self.query_one("#metrics", ListView).focus()
+
+    def on_resize(self, _event: events.Resize) -> None:
+        """Regenerate the plot when the terminal layout changes."""
+        self._redraw_plot()
 
     def refresh_from_orchestrator(self) -> None:
         """Refresh the plot from the latest app snapshot when history changes."""
@@ -156,8 +162,11 @@ class PerRunPlotScreen(Screen[None]):
 
         xs = [point[0] for point in points]
         ys = [point[1] for point in points]
-        width = max(int(plot.size.width or 90) - 4, 30)
-        height = max(int(plot.size.height or 20) - 3, 8)
+        container = self.query_one("#plot-content", Horizontal)
+        metrics_list = self.query_one("#metrics", ListView)
+        width = max(int(container.size.width) - int(metrics_list.size.width) - 2, 30)
+        height = max(int(container.size.height) - 1, 8)
+        self._last_plot_dimensions = (width, height)
 
         plt.clear_figure()
         plt.plotsize(width, height)
@@ -171,6 +180,11 @@ class PerRunPlotScreen(Screen[None]):
             higher_better = self._higher_better(self.selected_metric)
             plt.plot(xs, _running_best(ys, higher_better=higher_better), label=f"best({self.selected_metric})")
         self._last_plot_text = plt.build()
+        if not self._last_plot_text or not self._last_plot_text.strip():
+            self._last_plot_text = (
+                f"plotext build returned empty output for {self.selected_metric} "
+                f"(plot area: {width}x{height}, points: {len(xs)})"
+            )
         plt.yscale("linear")
         plot.update(Text.from_ansi(self._last_plot_text))
 
