@@ -169,7 +169,9 @@ def _format_metric(exp: dict[str, Any], name: object, value: object) -> str | Te
     metric_key = str(name) if name else ""
     metric_info = _metric_info_for(exp, metric_key)
     current = _coerce_float(value)
-    best = _lookup_best_metric_value(exp, metric_info)
+    if current is None and metric_key:
+        current = _lookup_metric_value(exp, metric_key, _metric_shortform(metric_info))
+    best = _lookup_best_metric_value(exp, metric_key, metric_info)
     if current is None and value is not None:
         return str(value)
     if current is None and best is None:
@@ -181,20 +183,51 @@ def _format_metric(exp: dict[str, Any], name: object, value: object) -> str | Te
 
 def _metric_info_for(exp: dict[str, Any], metric_key: str) -> dict[str, Any] | None:
     metric_info = exp.get("display_metric_info") or exp.get("metric_info") or {}
-    info = metric_info.get(metric_key) if isinstance(metric_info, dict) else None
-    return info if isinstance(info, dict) else None
-
-
-def _lookup_best_metric_value(exp: dict[str, Any], metric_info: dict[str, Any] | None) -> float | None:
-    if not metric_info:
+    if not isinstance(metric_info, dict):
         return None
-    best_key = metric_info.get("best_key")
+    info = metric_info.get(metric_key)
+    if isinstance(info, dict):
+        return info
+    for candidate in metric_info.values():
+        if not isinstance(candidate, dict):
+            continue
+        if candidate.get("shortform") == metric_key:
+            return candidate
+    return None
+
+
+def _metric_shortform(metric_info: dict[str, Any] | None) -> str | None:
+    shortform = metric_info.get("shortform") if isinstance(metric_info, dict) else None
+    return str(shortform) if shortform else None
+
+
+def _lookup_best_metric_value(
+    exp: dict[str, Any], metric_key: str | None, metric_info: dict[str, Any] | None
+) -> float | None:
+    best_key = _resolve_best_metric_key(metric_key, metric_info)
     if not best_key:
         return None
+    return _lookup_metric_value(exp, best_key)
+
+
+def _resolve_best_metric_key(metric_key: str | None, metric_info: dict[str, Any] | None) -> str | None:
+    best_key = metric_info.get("best_key") if isinstance(metric_info, dict) else None
+    if best_key:
+        return str(best_key)
+    if not metric_key:
+        return None
+    if "/step_best_" in metric_key:
+        return metric_key.replace("/step_best_", "/global_best_", 1)
+    return None
+
+
+def _lookup_metric_value(exp: dict[str, Any], metric_key: str, shortform: str | None = None) -> float | None:
     all_metrics = exp.get("all_metrics", {})
-    for source in (exp, all_metrics if isinstance(all_metrics, dict) else {}):
-        if best_key in source:
-            return _coerce_float(source[best_key])
+    candidates = [candidate for candidate in (shortform, metric_key) if candidate]
+    for candidate in candidates:
+        for source in (exp, all_metrics if isinstance(all_metrics, dict) else {}):
+            if candidate in source:
+                return _coerce_float(source[candidate])
     return None
 
 
@@ -211,7 +244,9 @@ def _metric_color(value: float | None, metric_info: dict[str, Any] | None) -> st
 
 
 def _format_metric_pair(current: float | None, best: float | None, *, metric_info: dict[str, Any] | None = None) -> str:
-    value_format = metric_info.get("value_format") if isinstance(metric_info, dict) else None
+    value_format = None
+    if isinstance(metric_info, dict):
+        value_format = metric_info.get("value_format") or metric_info.get("format")
     current_text = _format_metric_number(current, value_format=value_format)
     if best is None:
         return current_text
@@ -304,62 +339,48 @@ def _abbr_metric(metric_key: str | None) -> str:
 
 
 def _format_sparkline(exp: dict[str, Any], primary_metric: object, *, thresholds: SparklineThresholds | object | None):
-    for metric_name in _sparkline_metric_candidates(exp, primary_metric):
-        values = _history_metric_values(exp, metric_name)
-        if len(values) >= 2:
+    metric_name = _resolve_sparkline_metric(exp, primary_metric)
+    if metric_name:
+        values = _history_metric_values(exp, metric_name, coalesce_repeats=True)
+        if values:
             return render_sparkline(
                 values, width=20, higher_better=_higher_better(exp, metric_name), thresholds=thresholds
             )
     return "-"
 
 
-def _sparkline_metric_candidates(exp: dict[str, Any], primary_metric: object) -> list[str]:
-    candidates: list[str] = []
-
-    def add(value: object) -> None:
-        if value is None:
-            return
-        metric_name = str(value)
-        if metric_name and metric_name not in candidates:
-            candidates.append(metric_name)
-
+def _resolve_sparkline_metric(exp: dict[str, Any], primary_metric: object) -> str | None:
     primary_name = str(primary_metric) if primary_metric else ""
-    add(primary_name)
+    if not primary_name:
+        return None
+    return _resolve_history_metric_key(exp, primary_name)
 
+
+def _resolve_history_metric_key(exp: dict[str, Any], metric_name: str) -> str | None:
+    if _history_has_metric(exp, metric_name):
+        return metric_name
     metric_info = exp.get("display_metric_info") or exp.get("metric_info") or {}
     if isinstance(metric_info, dict):
         for metric_key, info in metric_info.items():
-            if metric_key == primary_name:
-                add(metric_key)
-                continue
+            if metric_key == metric_name and _history_has_metric(exp, metric_key):
+                return str(metric_key)
             shortform = info.get("shortform") if isinstance(info, dict) else None
-            if shortform and str(shortform) == primary_name:
-                add(metric_key)
-
-    add(exp.get("target_metric_name"))
-    add(exp.get("secondary_metric_name"))
-    for metric_key in _history_metric_keys(exp):
-        add(metric_key)
-    return candidates
+            if shortform and str(shortform) == metric_name and _history_has_metric(exp, str(metric_key)):
+                return str(metric_key)
+    return None
 
 
-def _history_metric_keys(exp: dict[str, Any]) -> list[str]:
-    keys: list[str] = []
+def _history_has_metric(exp: dict[str, Any], metric_name: str) -> bool:
     history = exp.get("history")
     if not isinstance(history, list):
-        return keys
-    for entry in history:
-        metrics = entry.get("metrics") if isinstance(entry, dict) else None
-        if not isinstance(metrics, dict):
-            continue
-        for metric_key in metrics:
-            metric_name = str(metric_key)
-            if metric_name not in keys:
-                keys.append(metric_name)
-    return keys
+        return False
+    return any(
+        isinstance(entry, dict) and isinstance(entry.get("metrics"), dict) and metric_name in entry.get("metrics", {})
+        for entry in history
+    )
 
 
-def _history_metric_values(exp: dict[str, Any], metric_name: str) -> list[float]:
+def _history_metric_values(exp: dict[str, Any], metric_name: str, *, coalesce_repeats: bool = False) -> list[float]:
     if not metric_name:
         return []
     values: list[float] = []
@@ -371,9 +392,12 @@ def _history_metric_values(exp: dict[str, Any], metric_name: str) -> list[float]
         if not isinstance(metrics, dict) or metric_name not in metrics:
             continue
         try:
-            values.append(float(metrics[metric_name]))
+            value = float(metrics[metric_name])
         except (TypeError, ValueError):
             continue
+        if coalesce_repeats and values and value == values[-1]:
+            continue
+        values.append(value)
     return values
 
 

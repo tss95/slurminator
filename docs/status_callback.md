@@ -32,6 +32,7 @@ status_cb = OrchestratorStatusCallback(
             higher_better=True,
             format=".2%",
             threshold=0.90,
+            best_key="val/global_best_accuracy",
         ),
         "val/loss": MetricDisplayCandidate(
             shortform="loss",
@@ -220,6 +221,10 @@ table when values exist.
 Metrics that are emitted but not listed in `metric_info` are still preserved in
 the status file and experiment-state YAML. They are not promoted to named
 dashboard columns unless you declare display metadata for them.
+
+If a metric has a separately tracked best-so-far value, set `best_key` in its
+`MetricDisplayCandidate`. Dashboard metric cells render the current value plus
+the best value in parentheses when that key is present in the status metrics.
 
 ## Project-Specific Metric Selection
 

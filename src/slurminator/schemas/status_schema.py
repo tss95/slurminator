@@ -87,8 +87,9 @@ class MetricInfo(BaseModel):
     higher_better: bool | None = None
     format: str | None = None
     threshold: float | None = None
+    best_key: str | None = None
 
-    @field_validator("shortform", "format")
+    @field_validator("shortform", "format", "best_key")
     @classmethod
     def _blank_strings_become_none(cls, value: str | None) -> str | None:
         if value is None:

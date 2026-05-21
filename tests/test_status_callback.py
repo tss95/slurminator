@@ -111,7 +111,7 @@ def test_status_callback_throttles_and_materializes_display_strictly(tmp_path):
         primary_metric="val/acc",
         secondary_metric="val/loss",
         metric_info={
-            "val/acc": MetricDisplayCandidate(shortform="acc", higher_better=True),
+            "val/acc": MetricDisplayCandidate(shortform="acc", higher_better=True, best_key="val/best_acc"),
             "val/loss": MetricDisplayCandidate(shortform="loss", higher_better=False),
         },
         min_write_interval_seconds=10.0,
@@ -139,6 +139,7 @@ def test_status_callback_throttles_and_materializes_display_strictly(tmp_path):
     assert updated.display.primary_metric == "val/acc"
     assert updated.display.secondary_metric is None
     assert set(updated.display.metric_info) == {"val/acc"}
+    assert updated.display.metric_info["val/acc"].best_key == "val/best_acc"
 
 
 def test_status_callback_atomic_replace_keeps_existing_file_readable(tmp_path):

@@ -29,7 +29,7 @@ def test_project_status_to_experiment_uses_generic_defaults() -> None:
         primary="val/acc",
         secondary="val/loss",
         metric_info={
-            "val/acc": MetricDisplayCandidate(shortform="acc", higher_better=True),
+            "val/acc": MetricDisplayCandidate(shortform="acc", higher_better=True, best_key="val/global_best_acc"),
             "val/loss": MetricDisplayCandidate(shortform="loss", higher_better=False),
         },
         links={"tracker_run_id": "abc"},
@@ -50,6 +50,7 @@ def test_project_status_to_experiment_uses_generic_defaults() -> None:
     assert exp["secondary_metric_value"] == 0.2
     assert exp["acc"] == 0.91
     assert exp["all_metrics"]["acc"] == 0.91
+    assert exp["display_metric_info"]["val/acc"]["best_key"] == "val/global_best_acc"
     assert "status_run_name" in updated
 
 

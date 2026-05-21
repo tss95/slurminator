@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import Any, Literal
 
 import plotext as plt
@@ -16,6 +17,9 @@ from textual.widgets import Footer, Header, Label, ListItem, ListView, Static
 from slurminator.dashboard_v4.keystrokes import PLOT_BINDINGS
 
 ProgressAxisUnit = Literal["epoch", "step"]
+ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+MAX_PLOT_WIDTH = 96
+MAX_PLOT_HEIGHT = 22
 
 
 class PerRunPlotScreen(Screen[None]):
@@ -176,10 +180,9 @@ class PerRunPlotScreen(Screen[None]):
 
         xs = [point[0] for point in points]
         ys = [point[1] for point in points]
-        container = self.query_one("#plot-content", Horizontal)
-        metrics_list = self.query_one("#metrics", ListView)
-        width = max(int(container.size.width) - int(metrics_list.size.width) - 2, 30)
-        height = max(int(container.size.height) - 1, 8)
+        width, height = _plot_dimensions(
+            plot, self.query_one("#plot-content", Horizontal), self.query_one("#metrics", ListView)
+        )
         self._last_plot_dimensions = (width, height)
         self._last_axis_unit = axis_unit
         self._last_axis_label = "Step" if axis_unit == "step" else "Epoch"
@@ -189,33 +192,30 @@ class PerRunPlotScreen(Screen[None]):
 
         plt.clear_figure()
         plt.plotsize(width, height)
-        plt.theme("pro")
-        plt.title(f"{self.exp.get('experiment_id', 'run')} - {self.selected_metric}")
+        plt.theme("clear")
+        plt.title(_shorten_middle(str(self.selected_metric), max(width - 8, 12)))
         plt.xlabel(self._last_axis_label)
         plt.ylabel(self.selected_metric)
         plt.yscale("log" if self.log_scale else "linear")
-        plt.grid(True, True)
+        plt.grid(False, False)
         if self._last_xticks:
             plt.xticks(self._last_xticks)
         if self._last_yticks:
             plt.yticks(self._last_yticks)
-        plt.plot(xs, ys, marker="braille", label=self.selected_metric)
+        plt.plot(xs, ys)
         if self.show_best_overlay:
             higher_better = self._higher_better(self.selected_metric)
-            plt.plot(
-                xs,
-                _running_best(ys, higher_better=higher_better),
-                marker="braille",
-                label=f"best({self.selected_metric})",
-            )
-        self._last_plot_text = plt.build()
+            plt.plot(xs, _running_best(ys, higher_better=higher_better), label="best")
+        self._last_plot_text = _strip_ansi(plt.build())
         if not self._last_plot_text or not self._last_plot_text.strip():
             self._last_plot_text = (
                 f"plotext build returned empty output for {self.selected_metric} "
                 f"(plot area: {width}x{height}, points: {len(xs)})"
             )
+        else:
+            self._last_plot_text = _clip_plot_output(self._last_plot_text, width=width, height=height)
         plt.yscale("linear")
-        plot.update(Text.from_ansi(self._last_plot_text))
+        plot.update(Text(self._last_plot_text))
 
     def _resolve_progress_unit(self) -> ProgressAxisUnit:
         return _resolve_progress_unit(self.history, self.exp)
@@ -250,6 +250,16 @@ def _metric_keys(history: list[dict[str, Any]]) -> list[str]:
 def _metric_item_id(metric: str) -> str:
     safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in metric)
     return f"metric-{safe}"
+
+
+def _plot_dimensions(plot: Static, container: Horizontal, metrics_list: ListView) -> tuple[int, int]:
+    plot_width = int(plot.size.width or 0) - 2
+    fallback_width = int(container.size.width or 0) - int(metrics_list.size.width or 0) - 4
+    width = plot_width if plot_width > 0 else fallback_width
+    plot_height = int(plot.size.height or 0) - 1
+    fallback_height = int(container.size.height or 0) - 1
+    height = plot_height if plot_height > 0 else fallback_height
+    return max(min(width, MAX_PLOT_WIDTH), 30), max(min(height, MAX_PLOT_HEIGHT), 8)
 
 
 def _resolve_progress_unit(history: list[dict[str, Any]], exp: dict[str, Any]) -> ProgressAxisUnit:
@@ -339,8 +349,10 @@ def _series_for_metric(
         x_value = _axis_value(entry, unit)
         if not _is_finite_number(x_value):
             x_value = fallback_x
-        points.append((float(x_value), y))
         fallback_x += 1
+        if points and points[-1][1] == y:
+            continue
+        points.append((float(x_value), y))
     return points
 
 
@@ -380,6 +392,26 @@ def _linear_ticks(values: list[float], *, max_ticks: int = 6) -> list[float]:
         return []
     n_ticks = max(2, max_ticks)
     return [y_min + (y_max - y_min) * index / (n_ticks - 1) for index in range(n_ticks)]
+
+
+def _strip_ansi(text: str) -> str:
+    return ANSI_RE.sub("", text)
+
+
+def _clip_plot_output(text: str, *, width: int, height: int) -> str:
+    lines = [line[:width].rstrip() for line in text.splitlines()]
+    return "\n".join(lines[:height])
+
+
+def _shorten_middle(text: str, max_length: int) -> str:
+    if len(text) <= max_length:
+        return text
+    marker = "..."
+    if max_length <= len(marker):
+        return text[:max_length]
+    left = max((max_length - len(marker)) // 2, 1)
+    right = max(max_length - left - len(marker), 1)
+    return f"{text[:left]}{marker}{text[-right:]}"
 
 
 def _running_best(values: list[float], *, higher_better: bool) -> list[float]:

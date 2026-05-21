@@ -35,6 +35,7 @@ from slurminator.dashboard_v4.log_screen import PerRunLogScreen
 from slurminator.dashboard_v4 import plot_screen as plot_screen_module
 from slurminator.dashboard_v4.per_run_menu import PerRunMenuScreen
 from slurminator.dashboard_v4.plot_screen import PerRunPlotScreen
+from slurminator.dashboard_v4.widgets import experiments_table as experiments_table_module
 from slurminator.dashboard_v4.widgets.sparkline import render_sparkline, slope_color
 from slurminator.dashboard_v4.widgets import ExperimentsTable
 from slurminator.experiments import ExperimentStatus
@@ -125,6 +126,17 @@ def _has_styled_span(text: Text, substring: str, style: str) -> bool:
     start = text.plain.index(substring)
     end = start + len(substring)
     return any(span.start <= start and span.end >= end and str(span.style) == style for span in text.spans)
+
+
+def _cell_plain(value: object) -> str:
+    return value.plain if isinstance(value, Text) else str(value)
+
+
+def _plot_text_fits_last_dimensions(screen: PerRunPlotScreen) -> bool:
+    assert screen._last_plot_dimensions is not None
+    width, height = screen._last_plot_dimensions
+    lines = screen._last_plot_text.splitlines()
+    return len(lines) <= height and all(len(line) <= width for line in lines)
 
 
 def _pending_commands(root: Path) -> list[Command]:
@@ -309,6 +321,77 @@ def test_textual_home_table_uses_status_colors_metric_colors_and_v3_order(tmp_pa
     asyncio.run(run())
 
 
+def test_textual_home_table_shows_best_values_for_primary_and_secondary(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        exp = dict(_experiments()[0])
+        exp.update(
+            {
+                "target_metric_name": "probe/lp0.010/step_best_top1_acc",
+                "target_metric_value": 0.72,
+                "secondary_metric_name": "probe/full/step_best_mf1",
+                "secondary_metric_value": 0.61,
+                "all_metrics": {
+                    "probe/lp0.010/step_best_top1_acc": 0.72,
+                    "probe/lp0.010/global_best_top1_acc": 0.81,
+                    "probe/full/step_best_mf1": 0.61,
+                    "probe/full/global_best_mf1": 0.69,
+                },
+                "display_metric_info": {
+                    "probe/lp0.010/step_best_top1_acc": {
+                        "shortform": "lp0.010_top1",
+                        "higher_better": True,
+                        "best_key": "probe/lp0.010/global_best_top1_acc",
+                    },
+                    "probe/full/step_best_mf1": {
+                        "shortform": "full_mf1",
+                        "higher_better": True,
+                        "best_key": "probe/full/global_best_mf1",
+                    },
+                },
+            }
+        )
+        orch._publish_dashboard_snapshot([exp])
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.pause(0.2)
+            row = app.screen.query_one(ExperimentsTable).get_row_at(0)
+            primary_cell = row[5]
+            secondary_cell = row[7]
+            assert _cell_plain(primary_cell) == "0.7200 (0.8100)"
+            assert _cell_plain(secondary_cell) == "0.6100 (0.6900)"
+
+    asyncio.run(run())
+
+
+def test_textual_home_table_infers_step_best_global_best_value(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        exp = dict(_experiments()[0])
+        exp.update(
+            {
+                "target_metric_name": "probe/lp0.010/step_best_top1_acc",
+                "target_metric_value": 0.72,
+                "all_metrics": {"probe/lp0.010/step_best_top1_acc": 0.72, "probe/lp0.010/global_best_top1_acc": 0.81},
+                "display_metric_info": {
+                    "probe/lp0.010/step_best_top1_acc": {"shortform": "lp0.010_top1", "higher_better": True}
+                },
+            }
+        )
+        orch._publish_dashboard_snapshot([exp])
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.pause(0.2)
+            primary_cell = app.screen.query_one(ExperimentsTable).get_row_at(0)[5]
+            assert _cell_plain(primary_cell) == "0.7200 (0.8100)"
+
+    asyncio.run(run())
+
+
 def test_textual_cancelled_status_uses_double_l_spelling(tmp_path: Path) -> None:
     async def run() -> None:
         orch = _orchestrator(tmp_path)
@@ -387,12 +470,15 @@ def test_textual_home_table_trajectory_resolves_shortform_history_metric(tmp_pat
     asyncio.run(run())
 
 
-def test_textual_home_table_trajectory_falls_back_to_history_metric(tmp_path: Path) -> None:
+def test_textual_home_table_trajectory_does_not_switch_to_unrelated_history_metric(tmp_path: Path) -> None:
     async def run() -> None:
         orch = _orchestrator(tmp_path)
         exp = dict(_experiments()[0])
-        exp.pop("target_metric_name", None)
+        exp["target_metric_name"] = "probe/lp0.010/step_best_top1_acc"
         exp.pop("target_metric_value", None)
+        exp["display_metric_info"] = {
+            "probe/lp0.010/step_best_top1_acc": {"shortform": "lp0.010_top1", "higher_better": True}
+        }
         exp["history"] = [
             {"timestamp": 1.0, "attempt": 1, "epoch": 1, "step": None, "metrics": {"loss": 1.2}},
             {"timestamp": 2.0, "attempt": 1, "epoch": 2, "step": None, "metrics": {"loss": 0.8}},
@@ -405,10 +491,47 @@ def test_textual_home_table_trajectory_falls_back_to_history_metric(tmp_path: Pa
             await pilot.pause(0.2)
             table = app.screen.query_one(ExperimentsTable)
             trajectory = table.get_row_at(0)[6]
-            assert isinstance(trajectory, Text)
-            assert trajectory.plain != "-"
+            assert trajectory == "-"
 
     asyncio.run(run())
+
+
+def test_textual_home_table_trajectory_coalesces_repeated_stale_metric_values() -> None:
+    exp = {
+        "target_metric_name": "probe/lp0.010/step_best_top1_acc",
+        "display_metric_info": {
+            "probe/lp0.010/step_best_top1_acc": {"shortform": "lp0.010_top1", "higher_better": True}
+        },
+        "history": [
+            {
+                "timestamp": 1.0,
+                "attempt": 1,
+                "epoch": 1,
+                "step": 100,
+                "metrics": {"probe/lp0.010/step_best_top1_acc": 0.7},
+            },
+            {
+                "timestamp": 2.0,
+                "attempt": 1,
+                "epoch": 1,
+                "step": 200,
+                "metrics": {"probe/lp0.010/step_best_top1_acc": 0.7},
+            },
+            {
+                "timestamp": 3.0,
+                "attempt": 1,
+                "epoch": 2,
+                "step": 1000,
+                "metrics": {"probe/lp0.010/step_best_top1_acc": 0.74},
+            },
+        ],
+    }
+
+    values = experiments_table_module._history_metric_values(
+        exp, "probe/lp0.010/step_best_top1_acc", coalesce_repeats=True
+    )
+
+    assert values == [0.7, 0.74]
 
 
 def test_textual_global_menu_opens_and_escape_closes(tmp_path: Path) -> None:
@@ -1304,12 +1427,14 @@ def test_textual_plot_screen_renders_metrics_and_toggles(tmp_path: Path) -> None
             assert isinstance(screen, PerRunPlotScreen)
             assert screen.metric_keys == ["acc", "loss"]
             assert screen.selected_metric == "acc"
-            assert "exp-1 - acc" in screen._last_plot_text
+            assert "acc" in screen._last_plot_text
+            assert _plot_text_fits_last_dimensions(screen)
 
             await pilot.press("down")
             await pilot.pause(0.1)
             assert screen.selected_metric == "loss"
-            assert "exp-1 - loss" in screen._last_plot_text
+            assert "loss" in screen._last_plot_text
+            assert _plot_text_fits_last_dimensions(screen)
 
             await pilot.press("l")
             await pilot.pause(0.1)
@@ -1319,7 +1444,7 @@ def test_textual_plot_screen_renders_metrics_and_toggles(tmp_path: Path) -> None
             await pilot.pause(0.1)
             assert screen.show_best_overlay is True
             assert screen._higher_better("loss") is False
-            assert "best(loss)" in screen._last_plot_text
+            assert "best" in screen._last_plot_text
 
     asyncio.run(run())
 
@@ -1421,6 +1546,12 @@ def test_textual_plot_screen_resolves_axis_unit_precedence_and_fallback() -> Non
         (200.0, 0.9),
         (3.0, 0.8),
     ]
+    repeated_history = [
+        {"epoch": 1, "step": 100, "metrics": {"loss": 1.0}},
+        {"epoch": 2, "step": 200, "metrics": {"loss": 1.0}},
+        {"epoch": 3, "step": 300, "metrics": {"loss": 0.8}},
+    ]
+    assert plot_screen_module._series_for_metric(repeated_history, "loss", unit="step") == [(100.0, 1.0), (300.0, 0.8)]
 
 
 def test_textual_plot_screen_v1_1_reader_accepts_history_without_unit() -> None:
@@ -1493,7 +1624,7 @@ def test_textual_plot_screen_defers_initial_draw_until_after_refresh(monkeypatch
             assert redraws == []
             callbacks[-1]()
             assert redraws == ["redraw"]
-            assert "exp-1 - acc" in screen._last_plot_text
+            assert "acc" in screen._last_plot_text
 
     asyncio.run(run())
 
@@ -1520,7 +1651,7 @@ def test_textual_plot_screen_resize_redraws_at_new_dimensions(tmp_path: Path) ->
             assert resized_dimensions is not None
             assert resized_dimensions[0] > initial_dimensions[0]
             assert resized_dimensions[1] >= initial_dimensions[1]
-            assert "exp-1 - acc" in screen._last_plot_text
+            assert "acc" in screen._last_plot_text
 
     asyncio.run(run())
 

@@ -452,6 +452,7 @@ def _metric_candidate_from_mapping(info: Mapping[str, object]) -> MetricDisplayC
         higher_better=higher_better,
         format=_clean_string(info.get("format")) or _clean_string(info.get("value_format")),
         threshold=_finite_float_or_none(info.get("threshold")),
+        best_key=_clean_string(info.get("best_key")),
     )
 
 

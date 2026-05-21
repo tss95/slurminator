@@ -100,9 +100,13 @@ spec left room for implementation detail.
   dashboard plotting only consumes that declared unit.
 - Step-based plots prefer `step` values with an explicit `Step` x-axis label.
   Epoch-based plots prefer `epoch` values with an explicit `Epoch` label.
-- The plot renderer now requests distributed x-axis ticks, linear y-axis ticks
-  when appropriate, gridlines, and point markers so short metric trajectories
-  remain readable in terminal-sized panels.
+- The plot renderer requests distributed x-axis ticks and linear y-axis ticks
+  when appropriate so short metric trajectories remain readable in
+  terminal-sized panels.
+- Live review later showed that dense gridlines, colored ANSI output, and
+  maximal plot sizing made plotext hard to read inside Textual panels. The v4
+  plot screen now uses a simpler clear theme, no grid, clipped plain-text output,
+  and capped dimensions so plots stay inside the widget bounds.
 
 ## Slice 7.5: Home Screen Parity Polish
 
@@ -221,6 +225,16 @@ spec left room for implementation detail.
   metric key, the display shortform, and finally the available history metric
   keys. Live runs exposed that exact-only lookup could leave the trajectory
   blank even when the history file contained metric points.
+- Follow-up live review exposed that falling through to arbitrary history keys
+  made the trajectory column change meaning over time, for example showing
+  total loss until a sparse probe metric appeared. The trajectory column now
+  tracks only the declared primary metric, resolves shortforms to raw history
+  keys, and coalesces consecutive repeated values so probe metrics are not
+  visually duplicated on every status write between probe updates.
+- `MetricInfo.best_key` is part of the in-development v1.1 status schema so v4
+  can restore the v3-style `current (best)` metric cells for primary and
+  secondary metrics. For older in-flight rows missing `best_key`, v4 infers the
+  common `step_best` -> `global_best` key pattern.
 - Live PMT review also exposed the opposite failure mode: no history files at
   all because Slurm jobs inherited `PMT_ENV_LOADED=1` from the launcher and
   `step_0.sh` could early-return inside `universal_job.sh`. PMT's job wrapper

@@ -25,11 +25,19 @@ def test_status_schema_roundtrip_validates_display_references():
         display={
             "run_name": "run-1",
             "primary_metric": "probe/lp0.010/step_best_top1_acc",
-            "metric_info": {"probe/lp0.010/step_best_top1_acc": {"shortform": "lp0.010_top1"}},
+            "metric_info": {
+                "probe/lp0.010/step_best_top1_acc": {
+                    "shortform": "lp0.010_top1",
+                    "best_key": "probe/lp0.010/global_best_top1_acc",
+                }
+            },
         },
     )
 
     assert OrchestratorStatus.model_validate_json(status.model_dump_json()) == status
+    assert (
+        status.display.metric_info["probe/lp0.010/step_best_top1_acc"].best_key == "probe/lp0.010/global_best_top1_acc"
+    )
 
 
 def test_status_schema_v1_1_reader_accepts_v1_0_status_without_attempt():

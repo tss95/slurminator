@@ -21,7 +21,7 @@ def test_normalize_status_payload_materializes_display_only_for_present_metrics(
         primary_metric="val/acc",
         secondary_metric="val/loss",
         metric_info={
-            "val/acc": MetricDisplayCandidate(shortform="acc", higher_better=True),
+            "val/acc": MetricDisplayCandidate(shortform="acc", higher_better=True, best_key="val/global_best_acc"),
             "val/loss": MetricDisplayCandidate(shortform="loss", higher_better=False),
         },
     )
@@ -29,6 +29,7 @@ def test_normalize_status_payload_materializes_display_only_for_present_metrics(
     assert status.display.primary_metric == "val/acc"
     assert status.display.secondary_metric is None
     assert set(status.display.metric_info) == {"val/acc"}
+    assert status.display.metric_info["val/acc"].best_key == "val/global_best_acc"
 
 
 def test_normalize_status_payload_filters_non_numeric_metrics_and_speed_zero():
@@ -40,9 +41,10 @@ def test_normalize_status_payload_filters_non_numeric_metrics_and_speed_zero():
         progress=GenericProgressSnapshot(unit="step", current_step=3, total_steps=10, speed_value=0.0),
         run_name="run-1",
         metrics={"ok": 1.5, "flag": True, "text": "bad"},
-        metric_info={"ok": MetricDisplayCandidate(shortform="ok")},
+        metric_info={"ok": MetricDisplayCandidate(shortform="ok", best_key="ok_best")},
     )
 
     assert status.metrics == {"ok": 1.5}
     assert status.progress.speed is None
     assert status.display.metric_info["ok"].shortform == "ok"
+    assert status.display.metric_info["ok"].best_key == "ok_best"
