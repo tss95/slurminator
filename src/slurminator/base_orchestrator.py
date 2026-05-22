@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from slurminator.experiments import ExperimentConfig, ExperimentStatus
 from slurminator.experiments.yaml_utils import dump_yaml
+from slurminator.git_provenance import capture_provenance
 
 if TYPE_CHECKING:
     from slurminator.experiments import MasterExperimentConfig
@@ -267,9 +268,15 @@ class BaseOrchestrator:
         """Generate a YAML file containing all experiments."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = self.output_dir / f"experiments_{timestamp}.yaml"
+        provenance = capture_provenance()
 
         yaml_data = {
-            "metadata": {"creation_time": datetime.now().isoformat(), "experiment_count": len(self.experiments)},
+            "metadata": {
+                "creation_time": datetime.now().isoformat(),
+                "experiment_count": len(self.experiments),
+                "project_git_sha": provenance["project"],
+                "slurminator_git_sha": provenance["slurminator"],
+            },
             "experiments": [],
         }
 

@@ -29,7 +29,7 @@ def test_project_status_to_experiment_uses_generic_defaults() -> None:
         primary="val/acc",
         secondary="val/loss",
         metric_info={
-            "val/acc": MetricDisplayCandidate(shortform="acc", higher_better=True),
+            "val/acc": MetricDisplayCandidate(shortform="acc", higher_better=True, best_key="val/global_best_acc"),
             "val/loss": MetricDisplayCandidate(shortform="loss", higher_better=False),
         },
         links={"tracker_run_id": "abc"},
@@ -38,8 +38,10 @@ def test_project_status_to_experiment_uses_generic_defaults() -> None:
 
     updated = project_status_to_experiment(exp, status)
 
-    assert exp["status_schema_version"] == "1.0"
+    assert exp["status_schema_version"] == "1.1"
     assert exp["status_experiment_id"] == "exp-1"
+    assert exp["progress_unit"] == "epoch"
+    assert exp["progress"]["unit"] == "epoch"
     assert exp["status_run_name"] == "run-1"
     assert exp["status_links"] == {"tracker_run_id": "abc"}
     assert exp["target_metric_name"] == "val/acc"
@@ -48,6 +50,7 @@ def test_project_status_to_experiment_uses_generic_defaults() -> None:
     assert exp["secondary_metric_value"] == 0.2
     assert exp["acc"] == 0.91
     assert exp["all_metrics"]["acc"] == 0.91
+    assert exp["display_metric_info"]["val/acc"]["best_key"] == "val/global_best_acc"
     assert "status_run_name" in updated
 
 
@@ -84,6 +87,8 @@ def test_project_status_to_experiment_supports_project_specific_aliases() -> Non
     assert "status_links" not in exp
     assert exp["tracker_id"] == "abc"
     assert exp["tracker_url"] == "https://example/run"
+    assert exp["progress_unit"] == "step"
+    assert exp["progress"]["unit"] == "step"
     assert exp["current_step"] == 12
     assert exp["max_steps"] == 50
     assert exp["current_epoch"] == 3
@@ -107,6 +112,8 @@ def test_status_projection_fields_reflects_configured_aliases() -> None:
 
     assert "tracker_run_name" in fields
     assert "tracker_id" in fields
+    assert "progress" in fields
+    assert "progress_unit" in fields
     assert "pseudo_epoch" in fields
     assert "it_per_sec" in fields
     assert "status_links" not in fields

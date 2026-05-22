@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from shlex import quote
-from typing import Any
+from typing import Any, Literal
 
 from slurminator.experiments import ExperimentStatus
 from slurminator.config import HPCType
@@ -19,6 +19,7 @@ from slurminator.timeout_policy import apply_timeout_policy
 logger = logging.getLogger("slurminator")
 
 IsLocalHPC = Callable[[HPCType], bool]
+LogSource = Literal["stdout", "stderr", "combined"]
 
 
 @dataclass
@@ -33,6 +34,15 @@ class LogGatheringContext:
     retry_timeout_with_estimated_time: bool = False
     timeout_retry_buffer: float = 1.3
     timeout_retry_max_attempts: int = 1
+
+
+@dataclass
+class LogTailReadResult:
+    """Result of one log-tail read."""
+
+    text: str
+    offsets: dict[str, int]
+    truncated: bool = False
 
 
 def gather_logs(exp: dict[str, Any], job_id: str, hpc_type: HPCType, context: LogGatheringContext) -> None:
@@ -128,4 +138,97 @@ def read_log_tail(exp: dict[str, Any], job_id: str, hpc_type: HPCType, context: 
         return None
 
 
-__all__ = ["LogGatheringContext", "gather_logs", "read_log_tail"]
+def read_log_tail_incremental(
+    exp: dict[str, Any],
+    job_id: str,
+    hpc_type: HPCType,
+    context: LogGatheringContext,
+    *,
+    lines: int = 500,
+    offsets: Mapping[str, int] | None = None,
+    source: LogSource = "combined",
+) -> LogTailReadResult:
+    """Read recent or newly-appended Slurm stdout/stderr log text."""
+    out_dir = exp.get("output_dir")
+    if not out_dir:
+        return LogTailReadResult(text="", offsets={})
+
+    previous_offsets = dict(offsets or {})
+    paths = _log_paths(out_dir, job_id, source=source)
+    new_offsets: dict[str, int] = {}
+    chunks: list[str] = []
+    truncated = False
+    include_headers = source == "combined"
+
+    for label, path in paths.items():
+        previous_offset = max(int(previous_offsets.get(label, 0) or 0), 0)
+        size = _log_file_size(path, hpc_type, context)
+        new_offsets[label] = size
+        if size <= 0:
+            continue
+
+        if previous_offset <= 0:
+            text = _tail_log_lines(path, lines, hpc_type, context)
+        elif size < previous_offset:
+            truncated = True
+            text = _tail_log_lines(path, lines, hpc_type, context)
+        elif size > previous_offset:
+            text = _tail_log_bytes(path, previous_offset, hpc_type, context)
+        else:
+            text = ""
+
+        if text:
+            body = text.rstrip()
+            if include_headers:
+                chunks.append(f"===== {label}: {path} =====\n{body}\n")
+            else:
+                chunks.append(body)
+
+    return LogTailReadResult(text="\n".join(chunks).strip(), offsets=new_offsets, truncated=truncated)
+
+
+def _log_paths(out_dir: object, job_id: str, *, source: LogSource) -> dict[str, Path]:
+    all_paths = {
+        "stdout": Path(str(out_dir)) / f"slurm-{job_id}.out",
+        "stderr": Path(str(out_dir)) / f"slurm-{job_id}.err",
+    }
+    if source == "stdout":
+        return {"stdout": all_paths["stdout"]}
+    if source == "stderr":
+        return {"stderr": all_paths["stderr"]}
+    return all_paths
+
+
+def _log_file_size(path: Path, hpc_type: HPCType, context: LogGatheringContext) -> int:
+    out = _run_log_command(f'stat -c "%s" {quote(str(path))} 2>/dev/null || echo 0', hpc_type, context)
+    try:
+        return max(int(str(out).strip().splitlines()[-1]), 0)
+    except Exception:
+        return 0
+
+
+def _tail_log_lines(path: Path, lines: int, hpc_type: HPCType, context: LogGatheringContext) -> str:
+    safe_lines = max(int(lines), 1)
+    return _run_log_command(f"tail -n {safe_lines} {quote(str(path))} 2>/dev/null || true", hpc_type, context)
+
+
+def _tail_log_bytes(path: Path, previous_offset: int, hpc_type: HPCType, context: LogGatheringContext) -> str:
+    return _run_log_command(f"tail -c +{previous_offset + 1} {quote(str(path))} 2>/dev/null || true", hpc_type, context)
+
+
+def _run_log_command(command: str, hpc_type: HPCType, context: LogGatheringContext) -> str:
+    if context.is_local_hpc(hpc_type):
+        result = subprocess.run(command, shell=True, capture_output=True, text=True)
+        return result.stdout
+    out, _ = context.connection_manager.run_command(hpc_type, command)
+    return out
+
+
+__all__ = [
+    "LogGatheringContext",
+    "LogSource",
+    "LogTailReadResult",
+    "gather_logs",
+    "read_log_tail",
+    "read_log_tail_incremental",
+]

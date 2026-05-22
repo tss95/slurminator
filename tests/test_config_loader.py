@@ -47,6 +47,7 @@ def test_load_user_config_finds_home_hpc_and_defaults_orchestrator(tmp_path: Pat
     assert loaded.cluster_configs[HPCType.FOX].partition == HPCPartition.ACCEL
     assert loaded.cluster_configs[HPCType.FOX].exclude_nodes == ["gpu-1", "gpu-2"]
     assert isinstance(loaded.orchestrator, OrchestratorSettings)
+    assert loaded.orchestrator.dashboard.ui_version == "v4"
     assert loaded.orchestrator.dashboard.timeout_risk.min_runtime_seconds == 15 * 60
     assert HPC_CONFIGS[HPCType.FOX].account == "acct"
 
@@ -122,6 +123,10 @@ def test_load_user_config_uses_repo_orchestrator_override(tmp_path: Path) -> Non
                 "  timeout_risk:",
                 "    min_progress: 0.25",
                 "    min_runtime_minutes: 20",
+                "  sparkline:",
+                "    flat_slope_norm: 0.02",
+                "    directional_slope_norm: 0.05",
+                "    oscillation_residual_norm: 0.2",
                 "retry:",
                 "  retry_timeout_with_estimated_time: true",
                 "  timeout_retry_buffer: 1.5",
@@ -141,6 +146,9 @@ def test_load_user_config_uses_repo_orchestrator_override(tmp_path: Path) -> Non
     assert loaded.orchestrator.dashboard.poll_interval_seconds == 7
     assert loaded.orchestrator.dashboard.timeout_risk.min_progress == pytest.approx(0.25)
     assert loaded.orchestrator.dashboard.timeout_risk.min_runtime_seconds == 20 * 60
+    assert loaded.orchestrator.dashboard.sparkline.flat_slope_norm == pytest.approx(0.02)
+    assert loaded.orchestrator.dashboard.sparkline.directional_slope_norm == pytest.approx(0.05)
+    assert loaded.orchestrator.dashboard.sparkline.oscillation_residual_norm == pytest.approx(0.2)
     assert loaded.orchestrator.retry.retry_timeout_with_estimated_time is True
     assert loaded.orchestrator.retry.timeout_retry_buffer == pytest.approx(1.5)
     assert loaded.orchestrator.retry.timeout_retry_max_attempts == 2
@@ -157,7 +165,8 @@ def test_parse_embedded_orchestrator_config_clamps_timeout_values() -> None:
         {
             "orchestrator": {
                 "dashboard": {
-                    "timeout_risk": {"min_progress": 9, "min_runtime_seconds": 0, "medium_ratio": -1, "high_ratio": -2}
+                    "timeout_risk": {"min_progress": 9, "min_runtime_seconds": 0, "medium_ratio": -1, "high_ratio": -2},
+                    "sparkline": {"flat_slope_norm": -1, "directional_slope_norm": -2, "oscillation_residual_norm": -3},
                 }
             }
         }
@@ -167,6 +176,9 @@ def test_parse_embedded_orchestrator_config_clamps_timeout_values() -> None:
     assert settings.dashboard.timeout_risk.min_runtime_seconds == 1
     assert settings.dashboard.timeout_risk.medium_ratio == 0.0
     assert settings.dashboard.timeout_risk.high_ratio == 0.0
+    assert settings.dashboard.sparkline.flat_slope_norm == 0.0
+    assert settings.dashboard.sparkline.directional_slope_norm == 0.0
+    assert settings.dashboard.sparkline.oscillation_residual_norm == 0.0
 
 
 def test_parse_command_settings_from_orchestrator_config() -> None:

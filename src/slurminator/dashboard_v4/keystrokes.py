@@ -1,0 +1,59 @@
+"""Centralized Textual binding tables for dashboard v4."""
+
+from textual.binding import Binding
+
+HOME_BINDINGS = [
+    Binding("up", "cursor_up", "Up"),
+    Binding("down", "cursor_down", "Down"),
+    Binding("enter", "drill_in", "Drill in"),
+    Binding("g", "app.global_menu", "Global"),
+    Binding("s", "toggle_sparkline", "Sparkline"),
+    Binding("y", "copy_experiment_id", "Copy ID"),
+    Binding("q", "quit", "Quit"),
+    Binding("escape", "noop", "", show=False),
+]
+
+GLOBAL_MENU_BINDINGS = [Binding("escape", "app.pop_screen", "Back")]
+
+PER_RUN_MENU_BINDINGS = [Binding("escape", "app.pop_screen", "Back"), Binding("g", "app.global_menu", "Global")]
+
+PLOT_BINDINGS = [
+    Binding("escape", "app.pop_screen", "Back"),
+    Binding("g", "app.global_menu", "Global"),
+    Binding("l", "toggle_log_scale", "Log scale"),
+    Binding("b", "toggle_best_overlay", "Best overlay"),
+    Binding("left", "previous_run", "Previous run"),
+    Binding("right", "next_run", "Next run"),
+    Binding("up", "metric_up", "Previous metric"),
+    Binding("down", "metric_down", "Next metric"),
+]
+
+DETAIL_BINDINGS = [
+    Binding("escape", "app.pop_screen", "Back"),
+    Binding("g", "app.global_menu", "Global"),
+    Binding("r", "refresh", "Refresh"),
+    Binding("up", "scroll_up", "Scroll up"),
+    Binding("down", "scroll_down", "Scroll down"),
+]
+
+LOG_BINDINGS = [
+    Binding("escape", "cancel_selection_or_back", "Back"),
+    Binding("g", "app.global_menu", "Global"),
+    Binding("r", "refresh", "Refresh"),
+    Binding("s", "toggle_log_source", "Source"),
+    Binding("c", "copy_log", "Copy log"),
+    Binding("y", "copy_log_selection", "Copy selection"),
+    Binding("space", "mark_log_selection", "Mark selection"),
+    Binding("m", "toggle_terminal_selection", "Mouse select"),
+    Binding("up", "scroll_up", "Scroll up"),
+    Binding("down", "scroll_down", "Scroll down"),
+]
+
+__all__ = [
+    "DETAIL_BINDINGS",
+    "GLOBAL_MENU_BINDINGS",
+    "HOME_BINDINGS",
+    "LOG_BINDINGS",
+    "PER_RUN_MENU_BINDINGS",
+    "PLOT_BINDINGS",
+]

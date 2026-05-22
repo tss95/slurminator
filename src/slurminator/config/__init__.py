@@ -17,6 +17,7 @@ from slurminator.config.orchestrator_config import (
     OrchestratorSettings,
     PollSettings,
     RetrySettings,
+    SparklineSettings,
     TimeoutRiskSettings,
     parse_orchestrator_settings,
 )
@@ -49,6 +50,7 @@ __all__ = [
     "REPO_ROOT_ENV",
     "ResourceStatus",
     "RetrySettings",
+    "SparklineSettings",
     "TimeoutRiskSettings",
     "UserConfigPaths",
     "determine_current_hpc",

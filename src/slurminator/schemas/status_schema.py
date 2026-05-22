@@ -7,7 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
+StatusSchemaVersion = Literal["1.0", "1.1"]
 StatusState = Literal["initializing", "running", "completed"]
 ProgressUnit = Literal["epoch", "step"]
 
@@ -86,8 +87,9 @@ class MetricInfo(BaseModel):
     higher_better: bool | None = None
     format: str | None = None
     threshold: float | None = None
+    best_key: str | None = None
 
-    @field_validator("shortform", "format")
+    @field_validator("shortform", "format", "best_key")
     @classmethod
     def _blank_strings_become_none(cls, value: str | None) -> str | None:
         if value is None:
@@ -138,7 +140,7 @@ class OrchestratorStatus(BaseModel):
 
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False, validate_assignment=True)
 
-    schema_version: Literal["1.0"] = SCHEMA_VERSION
+    schema_version: StatusSchemaVersion = SCHEMA_VERSION
     experiment_id: str = Field(min_length=1)
     job_id: str = Field(min_length=1)
     status: StatusState
@@ -147,6 +149,7 @@ class OrchestratorStatus(BaseModel):
     metrics: dict[str, float] = Field(default_factory=dict)
     display: Display
     links: dict[str, str] = Field(default_factory=dict)
+    attempt: int = Field(default=1, ge=1)
 
     @field_validator("experiment_id", "job_id")
     @classmethod
@@ -209,15 +212,31 @@ class OrchestratorStatus(BaseModel):
         return self
 
 
+class HistoryEntry(BaseModel):
+    """One JSONL history entry for a status write with metrics."""
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    schema_version: Literal["1.1"] = "1.1"
+    timestamp: float
+    attempt: int
+    epoch: int | None
+    step: int | None
+    unit: ProgressUnit | None = None
+    metrics: dict[str, float]
+
+
 __all__ = [
     "ALLOWED_STATUS_TRANSITIONS",
     "SCHEMA_VERSION",
     "Display",
+    "HistoryEntry",
     "MetricInfo",
     "OrchestratorStatus",
     "Progress",
     "ProgressUnit",
     "Speed",
+    "StatusSchemaVersion",
     "StatusState",
     "can_transition",
 ]

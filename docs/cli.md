@@ -67,7 +67,10 @@ Partition overrides:
 ## Runtime Behavior
 
 - `--poll-interval SECONDS`: scheduler polling interval. Default: `2`.
-- `--dashboard-ui v2|v3`: dashboard implementation. Default: `v3`.
+- `--dashboard-ui v2|v3|v4`: dashboard implementation. If omitted,
+  `orchestrator_config.yaml` may set `dashboard.ui_version`; otherwise the
+  package default is `v4`. Use `--dashboard-ui v3` for the legacy Rich
+  dashboard.
 - `--dry-run`: generate and validate inputs, then exit without launching jobs.
 - `--debug`: enable debug mode.
 - `--no-prog`: reserved compatibility flag; currently ignored by the generic

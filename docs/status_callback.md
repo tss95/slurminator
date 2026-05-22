@@ -8,10 +8,46 @@ The callback writes validated status files under:
 
 ```text
 $SAVE_PATH/.orchestrator_status[/sweep_<sweep_id>]/status_<job_id>.json
+$SAVE_PATH/.orchestrator_status[/sweep_<sweep_id>]/history_<job_id>.jsonl
 ```
 
 The dashboard ingests these files while jobs are running and projects the latest
 values onto the experiment-state YAML.
+
+## What Dashboard v4 Uses
+
+Dashboard v4 is the default UI. It still works without a callback for scheduler
+state, queued/running/completed counts, resource settings, and SLURM log tails.
+The job-side callback is required for run-internal training information:
+
+- Home-table progress, speed, ETA, primary/secondary metric values, and
+  best-so-far values come from `status_<job_id>.json`.
+- Trajectory sparklines and per-run plots come from `history_<job_id>.jsonl`.
+- Detail screens read the latest status snapshot plus the projected experiment
+  ledger fields.
+- Tracker links such as W&B URLs come from the callback's `links` block.
+
+For useful v4 plots, each status write should include the metrics you want to
+track over time. By default the base callback appends every finite numeric
+metric in `status.metrics` to the history file. Override `_history_metrics()`
+when a project needs a narrower or more explicit history set:
+
+```python
+class ProjectStatusCallback(OrchestratorStatusCallback):
+    def _history_metrics(self, status):
+        keep = {
+            "train/loss",
+            "val/accuracy",
+            "val/loss",
+        }
+        return {key: value for key, value in status.metrics.items() if key in keep}
+```
+
+History entries also store `attempt` and the progress `unit`. When a run is
+relaunched and writes to an existing history file, the callback increments
+`attempt`. Plot axes use `progress.unit`: step-counted runs should emit
+`unit="step"` so v4 plots against steps rather than project-specific
+pseudo-epochs.
 
 ## Minimal Integration
 
@@ -32,6 +68,7 @@ status_cb = OrchestratorStatusCallback(
             higher_better=True,
             format=".2%",
             threshold=0.90,
+            best_key="val/global_best_accuracy",
         ),
         "val/loss": MetricDisplayCandidate(
             shortform="loss",
@@ -206,7 +243,7 @@ status_cb.on_epoch_end(
 )
 ```
 
-The main v3 dashboard table discovers metric columns from:
+The main dashboard table discovers metric columns from:
 
 1. `primary_metric`,
 2. `secondary_metric`,
@@ -220,6 +257,10 @@ table when values exist.
 Metrics that are emitted but not listed in `metric_info` are still preserved in
 the status file and experiment-state YAML. They are not promoted to named
 dashboard columns unless you declare display metadata for them.
+
+If a metric has a separately tracked best-so-far value, set `best_key` in its
+`MetricDisplayCandidate`. Dashboard metric cells render the current value plus
+the best value in parentheses when that key is present in the status metrics.
 
 ## Project-Specific Metric Selection
 

@@ -8,10 +8,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from slurminator.display_helpers import extract_display_metrics as _extract_display_metrics
+from slurminator.experiments import ExperimentStatus
+from slurminator.history_ingest import read_history_incremental
+from slurminator.hpc_state import is_terminal_status
 from slurminator.schemas.status_schema import OrchestratorStatus
 from slurminator.status_projection import project_status_to_experiment, status_projection_fields
 
 logger = logging.getLogger("slurminator")
+HISTORY_TERMINAL_BOUND = 100
 
 LoadYaml = Callable[[], dict[str, Any]]
 SaveYaml = Callable[[dict[str, Any]], None]
@@ -35,6 +39,13 @@ def status_file_path(save_path: str, job_id: str, sweep_id: object | None = None
     return f"{save_path}/.orchestrator_status/status_{job_id}.json"
 
 
+def history_file_path(save_path: str, job_id: str, sweep_id: object | None = None) -> str:
+    """Return the target history-file path for a job."""
+    if sweep_id:
+        return f"{save_path}/.orchestrator_status/sweep_{sweep_id}/history_{job_id}.jsonl"
+    return f"{save_path}/.orchestrator_status/history_{job_id}.jsonl"
+
+
 def update_running_experiment_info(exp: dict[str, Any], context: StatusIngestContext) -> dict[str, Any] | None:
     """Read a target status file and project it into an experiment row."""
     job_id = exp.get("job_id")
@@ -48,6 +59,7 @@ def update_running_experiment_info(exp: dict[str, Any], context: StatusIngestCon
         save_path = getattr(cluster_config, "save_path", None) if cluster_config else None
     if not save_path:
         return None
+    exp.setdefault("save_path", str(save_path))
 
     path = status_file_path(str(save_path), str(job_id), exp.get("sweep_id"))
     out, _ = context.connection_manager.run_command(hpc_type, f"cat {path} 2>/dev/null")
@@ -66,8 +78,75 @@ def update_running_experiment_info(exp: dict[str, Any], context: StatusIngestCon
 
     data = status.model_dump(mode="json")
     apply_target_status_to_experiment(exp, status, context.projection_options)
+    if _is_active_history_status(exp.get("status")):
+        _read_and_merge_history(exp, context)
+    elif is_terminal_status(exp.get("status")):
+        _bound_terminal_history(exp)
     update_experiment_config_with_metrics(exp, data, context)
     return data
+
+
+def force_read_full_history(exp: dict[str, Any], context: StatusIngestContext) -> None:
+    """Force a one-shot full history read for an experiment row."""
+    exp["history"] = []
+    exp["history_last_read_offset"] = 0
+    _read_and_merge_history(exp, context)
+
+
+def _read_and_merge_history(exp: dict[str, Any], context: StatusIngestContext) -> None:
+    """Merge new history entries into ``exp['history']``."""
+    job_id = exp.get("job_id")
+    hpc_type = exp.get("hpc_assignment")
+    save_path = exp.get("save_path")
+    if not job_id or not hpc_type or not save_path:
+        return
+    exp.setdefault("history_truncated", False)
+
+    path = history_file_path(str(save_path), str(job_id), exp.get("sweep_id"))
+    last_offset = int(exp.get("history_last_read_offset", 0) or 0)
+    try:
+        result = read_history_incremental(
+            connection_manager=context.connection_manager, hpc_type=hpc_type, history_path=path, last_offset=last_offset
+        )
+    except Exception as exc:
+        logger.debug("History read failed for %s: %s", exp.get("experiment_id"), exc)
+        return
+
+    if result.truncated:
+        exp["history"] = []
+        exp["history_last_read_offset"] = 0
+
+    history = exp.setdefault("history", [])
+    history.extend(result.new_entries)
+    exp["history_last_read_offset"] = result.new_offset
+
+    if result.new_entries:
+        exp["history_attempt_max"] = max(
+            int(exp.get("history_attempt_max", 0) or 0), max(int(entry["attempt"]) for entry in result.new_entries)
+        )
+
+
+def _bound_terminal_history(exp: dict[str, Any]) -> None:
+    """Trim terminal rows to the retained in-memory history bound."""
+    if exp.get("history_truncated"):
+        return
+    exp.setdefault("history_truncated", False)
+    history = exp.get("history", [])
+    if len(history) > HISTORY_TERMINAL_BOUND:
+        exp["history"] = history[-HISTORY_TERMINAL_BOUND:]
+        exp["history_truncated"] = True
+
+
+def _is_active_history_status(status: Any) -> bool:
+    if not isinstance(status, ExperimentStatus):
+        try:
+            status = ExperimentStatus(str(status))
+        except ValueError:
+            try:
+                status = ExperimentStatus[str(status).upper()]
+            except KeyError:
+                return False
+    return status in {ExperimentStatus.RUNNING, ExperimentStatus.QUEUED}
 
 
 def apply_target_status_to_experiment(
@@ -111,9 +190,12 @@ def populate_display_metrics(experiments: list[dict[str, Any]]) -> None:
 
 
 __all__ = [
+    "HISTORY_TERMINAL_BOUND",
     "StatusIngestContext",
     "apply_target_status_to_experiment",
     "extract_display_metrics",
+    "force_read_full_history",
+    "history_file_path",
     "populate_display_metrics",
     "status_file_path",
     "update_experiment_config_with_metrics",

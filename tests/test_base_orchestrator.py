@@ -7,6 +7,7 @@ from slurminator import base_orchestrator as base_module
 from slurminator.base_orchestrator import BaseOrchestrator
 from slurminator.experiments import CustomSweepCase, CustomSweepConfig, ExperimentConfig, ExperimentStatus
 from slurminator.experiments import MasterExperimentConfig
+from slurminator.experiments.yaml_utils import load_yaml
 
 pytestmark = pytest.mark.unit
 
@@ -49,6 +50,30 @@ def test_get_project_name_stable(make_orchestrator, monkeypatch):
     name2 = orchestrator._get_project_name("test")
     assert name1 == name2 == "test_20200102_030405"
     assert orchestrator._get_project_name("other") == "other_20200102_030405"
+
+
+def test_generate_experiment_file_includes_git_provenance_metadata(make_orchestrator, monkeypatch, tmp_path):
+    orchestrator = make_orchestrator
+    orchestrator.output_dir = tmp_path
+    provenance = {"project": "a" * 40, "slurminator": "b" * 40}
+    monkeypatch.setattr(base_module, "capture_provenance", lambda: provenance)
+    orchestrator.experiments = [
+        ExperimentConfig(
+            task_type="self_supervised",
+            dataset_name="demo",
+            experiment_id="demo_exp",
+            status=ExperimentStatus.PENDING,
+            metadata={},
+        )
+    ]
+
+    path = orchestrator.generate_experiment_file()
+
+    data = load_yaml(path)
+    assert data["metadata"]["project_git_sha"] == provenance["project"]
+    assert data["metadata"]["slurminator_git_sha"] == provenance["slurminator"]
+    assert data["metadata"]["experiment_count"] == 1
+    assert data["experiments"][0]["experiment_id"] == "demo_exp"
 
 
 def test_custom_sweep_generates_seeded_runs(make_orchestrator):

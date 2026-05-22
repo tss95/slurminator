@@ -1,3 +1,4 @@
+import copy
 import logging
 import os
 import time
@@ -9,13 +10,20 @@ from typing import Any, Dict, List, Optional, Type
 # unit tests (and --debug mode) can run without Rich installed.
 
 from slurminator.cli.override_parser import parse_override_list
+from slurminator.command_queue import CommandQueueContext, default_command_handlers, process_command_queue
 from slurminator.config import HPCType, HPC_CONFIGS, is_current_hpc
 from slurminator.experiments import ExperimentStatus
 from slurminator.experiment_policy import resolve_extra_remote_dirs, resolve_resource_overrides
 from slurminator.hpc_state import is_terminal_status
 from slurminator.plugins import CommandBuildContext, DefaultOrchestratorPlugin, OrchestratorPlugin
 from slurminator.connection_manager import HPCConnectionManager, HPCConnectionConfig
-from slurminator.log_gathering import LogGatheringContext, gather_logs
+from slurminator.log_gathering import (
+    LogGatheringContext,
+    LogSource,
+    LogTailReadResult,
+    gather_logs,
+    read_log_tail_incremental,
+)
 from slurminator.reassignment import ReassignmentContext, maybe_reassign_experiments
 from slurminator.scheduler_polling import expand_short, map_state, poll_hpc, update_scheduler_statuses
 from slurminator.state_store import ExperimentStateStore, replace_exp_in_list
@@ -23,6 +31,7 @@ from slurminator.status_ingest import (
     StatusIngestContext,
     apply_target_status_to_experiment,
     extract_display_metrics,
+    force_read_full_history as force_read_full_history_from_status,
     populate_display_metrics,
     update_experiment_config_with_metrics,
     update_running_experiment_info,
@@ -80,7 +89,7 @@ class HPCOrchestrator:
         time_hours_override: Optional[int] = None,
         memory_gb_override: Optional[int] = None,
         debug: bool = False,
-        dashboard_ui: str = "v3",
+        dashboard_ui: str = "v4",
         *,
         connection_manager: Optional["HPCConnectionManager"] = None,
         retry_timeout_with_estimated_time: bool = False,
@@ -93,6 +102,7 @@ class HPCOrchestrator:
         parse_overrides: Optional[Callable[[list[str] | str], dict[str, Any]]] = None,
         is_local_hpc_fn: Optional[IsLocalHPC] = None,
         dashboard_cls: Optional[Type[Any]] = None,
+        dashboard_settings: object | None = None,
         overview_printer: Optional[OverviewPrinter] = None,
     ):
         self.experiment_file = Path(experiment_file).resolve()
@@ -102,6 +112,9 @@ class HPCOrchestrator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self.concurrency_limits = concurrency_limits or {}
+        self.submissions_paused = False
+        self._dashboard_exit_requested = False
+        self._dashboard_snapshot: list[dict[str, Any]] = []
         self.state_store = ExperimentStateStore(self.experiment_file, self.concurrency_limits)
         self.poll_interval = poll_interval
         self.max_unqueue_seconds = max_unqueue_seconds
@@ -123,6 +136,7 @@ class HPCOrchestrator:
 
         self.debug = debug
         self.dashboard_ui = dashboard_ui
+        self.dashboard_settings = dashboard_settings
         self.retry_timeout_with_estimated_time = retry_timeout_with_estimated_time
         self.timeout_retry_buffer = timeout_retry_buffer
         self.timeout_retry_max_attempts = timeout_retry_max_attempts
@@ -333,6 +347,7 @@ class HPCOrchestrator:
                     data = self._load_yaml()
                     exps = data["experiments"]
 
+                    self._process_command_queue(exps)
                     self._update_statuses(exps)
                     self._update_queue_estimates(exps)
                     data["experiments"] = exps
@@ -340,13 +355,15 @@ class HPCOrchestrator:
 
                     concurrency_used = self._count_concurrency(exps)
 
-                    for exp in exps:
-                        self._maybe_submit(exp, concurrency_used, data)
+                    if not self.submissions_paused:
+                        for exp in exps:
+                            self._maybe_submit(exp, concurrency_used, data)
 
-                    self._maybe_reassign_experiments(exps, concurrency_used, data)
+                        self._maybe_reassign_experiments(exps, concurrency_used, data)
 
                     data["experiments"] = exps
                     self._save_yaml(data)
+                    self._publish_dashboard_snapshot(exps)
 
                     print_overview(exps)
 
@@ -356,47 +373,60 @@ class HPCOrchestrator:
 
                     time.sleep(self.poll_interval)
             else:
-                # Import here to avoid mandatory Rich dependency when --debug
-                # is enabled (text-only mode) or during unit testing.
-                if self.dashboard_cls is None:
-                    from slurminator.ui_dashboard import TerminalDashboard
-                else:
-                    TerminalDashboard = self.dashboard_cls
-
-                dash = TerminalDashboard(n_recent=0, ui_version=self.dashboard_ui)
+                DashboardCls = self._resolve_dashboard_cls()
+                dashboard_kwargs = {"n_recent": 0, "ui_version": self.dashboard_ui}
+                if str(self.dashboard_ui).strip().lower() == "v4":
+                    dashboard_kwargs["sparkline_thresholds"] = getattr(self.dashboard_settings, "sparkline", None)
+                dash = DashboardCls(**dashboard_kwargs)
 
                 with dash.mount(self) as live:
                     while True:
                         data = self._load_yaml()
                         exps = data["experiments"]
 
+                        self._process_command_queue(exps)
+                        if self._dashboard_requested_exit(dash):
+                            logger.info("Dashboard requested orchestrator exit.")
+                            break
                         self._update_statuses(exps)
                         self._update_queue_estimates(exps)
                         data["experiments"] = exps
                         self._save_yaml(data)
+                        if self._dashboard_requested_exit(dash):
+                            logger.info("Dashboard requested orchestrator exit.")
+                            break
 
                         concurrency_used = self._count_concurrency(exps)
 
-                        for exp in exps:
-                            self._maybe_submit(exp, concurrency_used, data)
+                        if not self.submissions_paused:
+                            for exp in exps:
+                                self._maybe_submit(exp, concurrency_used, data)
 
-                        self._maybe_reassign_experiments(exps, concurrency_used, data)
+                            self._maybe_reassign_experiments(exps, concurrency_used, data)
 
                         data["experiments"] = exps
                         self._save_yaml(data)
 
                         # Ensure all experiments have display metrics populated before rendering
                         populate_display_metrics(exps)
+                        self._publish_dashboard_snapshot(exps)
                         live.update(dash.render(exps))
+
+                        if self._dashboard_requested_exit(dash):
+                            logger.info("Dashboard requested orchestrator exit.")
+                            break
 
                         if self._all_done(exps):
                             logger.info("All experiments terminal => exiting orchestrator.")
                             # Ensure display metrics are populated for final render
                             populate_display_metrics(exps)
+                            self._publish_dashboard_snapshot(exps)
                             live.update(dash.render(exps))
                             break
 
-                        time.sleep(self.poll_interval)
+                        if self._sleep_until_next_poll(dash):
+                            logger.info("Dashboard requested orchestrator exit.")
+                            break
 
         except KeyboardInterrupt:
             logger.info("User interrupted HPC Orchestrator.")
@@ -406,6 +436,39 @@ class HPCOrchestrator:
         finally:
             logger.info("Closing HPC connections.")
             self.connection_manager.close_all()
+
+    def _resolve_dashboard_cls(self):
+        """Resolve the concrete dashboard class for the requested UI version."""
+        if str(self.dashboard_ui).strip().lower() == "v4":
+            from slurminator.dashboard_v4.app import TextualDashboardApp
+
+            return TextualDashboardApp
+        if self.dashboard_cls is not None:
+            return self.dashboard_cls
+        from slurminator.ui_dashboard import TerminalDashboard
+
+        return TerminalDashboard
+
+    def _publish_dashboard_snapshot(self, exps: list[dict[str, Any]]) -> None:
+        """Publish a copy of the latest ledger for threaded dashboard readers."""
+        self._dashboard_snapshot = copy.deepcopy(exps)
+
+    def _dashboard_requested_exit(self, dashboard: Any) -> bool:
+        """Return True when a dashboard requested the orchestrator loop to stop."""
+        return bool(
+            getattr(self, "_dashboard_exit_requested", False) or getattr(dashboard, "dashboard_exit_requested", False)
+        )
+
+    def _sleep_until_next_poll(self, dashboard: Any) -> bool:
+        """Sleep until the next poll, waking early for dashboard exit requests."""
+        deadline = time.monotonic() + max(float(self.poll_interval), 0.0)
+        while True:
+            if self._dashboard_requested_exit(dashboard):
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                return self._dashboard_requested_exit(dashboard)
+            time.sleep(min(remaining, 0.2))
 
     # -------------------------------------------------------------------------
     # Preflight checks
@@ -680,6 +743,74 @@ class HPCOrchestrator:
         )
         update_experiment_config_with_metrics(exp, data, context)
 
+    def force_read_full_history(self, exp: dict[str, Any]) -> None:
+        """Force a one-shot full history read for dashboard drill-in screens."""
+        if not exp.get("save_path"):
+            hpc_type = exp.get("hpc_assignment")
+            cluster_config = HPC_CONFIGS.get(hpc_type)
+            if cluster_config is None and hpc_type is not None:
+                try:
+                    cluster_config = HPC_CONFIGS.get(HPCType[str(hpc_type).upper()])
+                except KeyError:
+                    cluster_config = None
+            save_path = getattr(cluster_config, "save_path", None) if cluster_config else None
+            if save_path:
+                exp["save_path"] = str(save_path)
+
+        if not exp.get("job_id") or not exp.get("hpc_assignment") or not exp.get("save_path"):
+            return
+
+        context = StatusIngestContext(
+            connection_manager=self.connection_manager,
+            hpc_configs=HPC_CONFIGS,
+            load_yaml=self._load_yaml,
+            save_yaml=self._save_yaml,
+            projection_options=self.projection_options,
+        )
+        force_read_full_history_from_status(exp, context)
+
+    def read_log_tail_for(
+        self,
+        exp: dict[str, Any],
+        *,
+        lines: int = 500,
+        offsets: Mapping[str, int] | None = None,
+        source: LogSource = "combined",
+    ) -> LogTailReadResult:
+        """Read recent or newly-appended Slurm log text for a dashboard screen."""
+        job_id = exp.get("job_id")
+        hpc_type = self._coerce_hpc_type(exp.get("hpc_assignment"))
+        if not job_id or hpc_type is None:
+            return LogTailReadResult(text="", offsets=dict(offsets or {}))
+        context = LogGatheringContext(
+            connection_manager=self.connection_manager,
+            hpc_configs=HPC_CONFIGS,
+            plugin=self.plugin,
+            is_local_hpc=self.is_local_hpc,
+            global_time_hours_override=self.time_hours_override,
+            retry_timeout_with_estimated_time=self.retry_timeout_with_estimated_time,
+            timeout_retry_buffer=self.timeout_retry_buffer,
+            timeout_retry_max_attempts=self.timeout_retry_max_attempts,
+        )
+        return read_log_tail_incremental(
+            exp, str(job_id), hpc_type, context, lines=lines, offsets=offsets, source=source
+        )
+
+    @staticmethod
+    def _coerce_hpc_type(value: object) -> HPCType | None:
+        if isinstance(value, HPCType):
+            return value
+        if value is None:
+            return None
+        text = str(value).strip()
+        try:
+            return HPCType(text)
+        except ValueError:
+            try:
+                return HPCType[text.upper()]
+            except KeyError:
+                return None
+
     def _extract_display_metrics(self, exp: dict) -> dict:
         """Extract display metrics for UI from target-schema display metadata.
 
@@ -709,6 +840,51 @@ class HPCOrchestrator:
             save_yaml=self._save_yaml,
         )
         maybe_reassign_experiments(exps, concurrency_used, data, context)
+
+    def _process_command_queue(self, exps: list[dict[str, Any]]) -> int:
+        """Process pending operator commands for all known command queue roots."""
+        processed = 0
+        for save_path in self._command_queue_save_paths(exps):
+            context = CommandQueueContext(
+                save_path=save_path,
+                handlers=default_command_handlers(),
+                exps=exps,
+                orchestrator=self,
+                connection_manager=self.connection_manager,
+            )
+            processed += process_command_queue(context)
+        return processed
+
+    def _command_queue_save_paths(self, exps: list[dict[str, Any]]) -> list[Path]:
+        """Return local command-queue roots, preferring configured SAVE_PATH values."""
+        paths: list[Path] = []
+        paths.append(self.experiment_dir)
+
+        env_save_path = os.getenv("SAVE_PATH")
+        if env_save_path:
+            paths.append(Path(env_save_path))
+
+        for exp in exps:
+            if exp.get("save_path"):
+                paths.append(Path(str(exp["save_path"])))
+
+        for hpc_type, limit in self.concurrency_limits.items():
+            if int(limit or 0) <= 0:
+                continue
+            cluster_config = HPC_CONFIGS.get(hpc_type)
+            save_path = getattr(cluster_config, "save_path", None) if cluster_config else None
+            if save_path:
+                paths.append(Path(str(save_path)))
+
+        deduped: list[Path] = []
+        seen: set[str] = set()
+        for path in paths:
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(path)
+        return deduped
 
     # -------------------------------------------------------------------------
     # Done check

@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from slurminator.schemas.status_schema import OrchestratorStatus, can_transition
+from slurminator.schemas.status_schema import HistoryEntry, OrchestratorStatus, can_transition
 
 pytestmark = pytest.mark.unit
 
@@ -25,11 +25,62 @@ def test_status_schema_roundtrip_validates_display_references():
         display={
             "run_name": "run-1",
             "primary_metric": "probe/lp0.010/step_best_top1_acc",
-            "metric_info": {"probe/lp0.010/step_best_top1_acc": {"shortform": "lp0.010_top1"}},
+            "metric_info": {
+                "probe/lp0.010/step_best_top1_acc": {
+                    "shortform": "lp0.010_top1",
+                    "best_key": "probe/lp0.010/global_best_top1_acc",
+                }
+            },
         },
     )
 
     assert OrchestratorStatus.model_validate_json(status.model_dump_json()) == status
+    assert (
+        status.display.metric_info["probe/lp0.010/step_best_top1_acc"].best_key == "probe/lp0.010/global_best_top1_acc"
+    )
+
+
+def test_status_schema_v1_1_reader_accepts_v1_0_status_without_attempt():
+    status = OrchestratorStatus.model_validate(
+        {
+            "schema_version": "1.0",
+            "experiment_id": "exp-1",
+            "job_id": "123",
+            "status": "running",
+            "last_update": 100.0,
+            "progress": {"unit": "epoch", "current": 1, "total": 2, "current_epoch": 1, "total_epochs": 2},
+            "metrics": {},
+            "display": {"run_name": "run-1"},
+            "links": {},
+        }
+    )
+
+    assert status.schema_version == "1.0"
+    assert status.attempt == 1
+
+
+def test_history_entry_json_roundtrip():
+    entry = HistoryEntry(
+        timestamp=100.0, attempt=2, epoch=3, step=12, unit="step", metrics={"train/loss": 0.5, "val/acc": 0.75}
+    )
+
+    assert HistoryEntry.model_validate_json(entry.model_dump_json()) == entry
+
+
+def test_history_entry_v1_1_reader_accepts_earlier_v1_1_without_unit():
+    entry = HistoryEntry.model_validate(
+        {
+            "schema_version": "1.1",
+            "timestamp": 100.0,
+            "attempt": 1,
+            "epoch": 2,
+            "step": 200,
+            "metrics": {"train/loss": 0.5},
+        }
+    )
+
+    assert entry.schema_version == "1.1"
+    assert entry.unit is None
 
 
 def test_status_schema_rejects_orphan_display_metric_info():

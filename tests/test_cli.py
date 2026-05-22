@@ -90,6 +90,7 @@ def test_cli_constructs_orchestrator_with_simple_command_plugin(monkeypatch, tmp
     )
 
     assert captured["experiment_file"] == str(exp_file)
+    assert captured["dashboard_ui"] == "v4"
     assert isinstance(captured["plugin"], SimpleCommandPlugin)
     assert captured["plugin"].entrypoint == "python train.py"
     assert captured["plugin"].config_arg == "--config"
@@ -122,6 +123,9 @@ def test_cli_uses_orchestrator_config_simple_command_defaults(monkeypatch, tmp_p
                 "  config_arg: --cfg",
                 "  sweep_params_arg: --overrides",
                 "  extra_args: [--quiet]",
+                "dashboard:",
+                "  sparkline:",
+                "    directional_slope_norm: 0.04",
                 "",
             ]
         )
@@ -155,7 +159,53 @@ def test_cli_uses_orchestrator_config_simple_command_defaults(monkeypatch, tmp_p
     assert captured["plugin"].config_arg == "--cfg"
     assert captured["plugin"].sweep_params_arg == "--overrides"
     assert captured["plugin"].extra_args == ("--quiet",)
+    assert captured["dashboard_settings"].sparkline.directional_slope_norm == pytest.approx(0.04)
     assert captured["ran"] is True
+
+
+def test_cli_resolves_dashboard_ui_from_config_and_cli_override(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("SLURMINATOR_PLUGIN", raising=False)
+    hpc_file = tmp_path / "hpc_config.yaml"
+    hpc_file.write_text(
+        "\n".join(
+            [
+                "clusters:",
+                "  OLIVIA:",
+                "    partition: accel",
+                "    account: acct",
+                "    hostname: olivia.example",
+                "    username: user",
+                "",
+            ]
+        )
+    )
+    orchestrator_file = tmp_path / "orchestrator_config.yaml"
+    orchestrator_file.write_text("dashboard:\n  ui_version: v2\n")
+    exp_file = tmp_path / "exps.yaml"
+    exp_file.write_text("experiments: []\n")
+    captured: list[str] = []
+
+    class FakeOrchestrator:
+        def __init__(self, **kwargs):
+            captured.append(kwargs["dashboard_ui"])
+
+        def run(self):
+            return None
+
+    common_args = [
+        "--yaml",
+        str(exp_file),
+        "--hpc-config-file",
+        str(hpc_file),
+        "--orchestrator-config-file",
+        str(orchestrator_file),
+    ]
+    run_orchestrator_cli(argv=common_args, launch_guard=lambda: None, orchestrator_cls=FakeOrchestrator)
+    run_orchestrator_cli(
+        argv=[*common_args, "--dashboard-ui", "v3"], launch_guard=lambda: None, orchestrator_cls=FakeOrchestrator
+    )
+
+    assert captured == ["v2", "v3"]
 
 
 def test_discover_plugin_loads_env_class(monkeypatch) -> None:

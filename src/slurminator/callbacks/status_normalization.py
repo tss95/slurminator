@@ -25,6 +25,7 @@ class MetricDisplayCandidate:
     higher_better: bool | None = None
     format: str | None = None
     threshold: float | None = None
+    best_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -173,12 +174,14 @@ def _coerce_metric_info(candidate: MetricDisplayCandidate | MetricInfo | Mapping
             higher_better=candidate.higher_better,
             format=candidate.format,
             threshold=candidate.threshold,
+            best_key=candidate.best_key,
         )
     return MetricInfo(
         shortform=_optional_string(candidate.get("shortform")),
         higher_better=_optional_bool(candidate.get("higher_better")),
         format=_optional_string(candidate.get("format")),
         threshold=_optional_finite_float(candidate.get("threshold")),
+        best_key=_optional_string(candidate.get("best_key")),
     )
 
 
