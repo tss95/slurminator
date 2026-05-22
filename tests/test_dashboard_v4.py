@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 import logging
 import os
 import re
@@ -15,6 +16,7 @@ from textual import events
 from textual.css.query import NoMatches
 from textual.widgets import Button, Input, Label, ListView, RichLog, Static
 
+import slurminator.hpc_orchestrator as hpc_orchestrator_module
 from slurminator.command_queue import Command
 from slurminator.config import HPCType
 from slurminator.dashboard_v4.app import (
@@ -45,6 +47,7 @@ from slurminator.dashboard_v4.widgets import experiments_table as experiments_ta
 from slurminator.dashboard_v4.widgets.sparkline import render_sparkline, slope_color
 from slurminator.dashboard_v4.widgets import ExperimentsTable
 from slurminator.experiments import ExperimentStatus
+from slurminator.ui_dashboard import TerminalDashboard
 from slurminator.hpc_orchestrator import HPCOrchestrator
 from slurminator.schemas.status_schema import HistoryEntry
 
@@ -212,6 +215,28 @@ def test_orchestrator_dashboard_resolver_defaults_to_v4_and_keeps_legacy_v3(tmp_
     assert orch_default._resolve_dashboard_cls() is TextualDashboardApp
     assert orch_v3._resolve_dashboard_cls() is PluginDashboard
     assert orch_v4._resolve_dashboard_cls() is TextualDashboardApp
+    assert orch_v4._effective_dashboard_ui(TextualDashboardApp) == "v4"
+
+
+def test_orchestrator_dashboard_resolver_falls_back_to_v3_when_v4_dependency_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    real_import_module = importlib.import_module
+
+    def fake_import_module(name: str, package: str | None = None):  # noqa: ANN202
+        if name == "slurminator.dashboard_v4.app":
+            raise ModuleNotFoundError("No module named 'textual'", name="textual")
+        return real_import_module(name, package)
+
+    monkeypatch.setattr(hpc_orchestrator_module.importlib, "import_module", fake_import_module)
+    orch = _orchestrator(tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger="slurminator"):
+        dashboard_cls = orch._resolve_dashboard_cls()
+
+    assert dashboard_cls is TerminalDashboard
+    assert orch._effective_dashboard_ui(dashboard_cls) == "v3"
+    assert "falling back to dashboard v3" in caplog.text
 
 
 def test_textual_home_table_renders_and_cursor_moves(tmp_path: Path) -> None:

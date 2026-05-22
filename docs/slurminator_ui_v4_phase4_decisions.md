@@ -54,6 +54,9 @@ spec left room for implementation detail.
 - Textual initially lived in the `v4` extra while v4 was opt-in. After live
   review made v4 the default dashboard, Textual and plotext were promoted to
   base dependencies so a default install can launch the default UI.
+- Existing editable/source installations may pull the new default before
+  reinstalling dependencies. In that case the resolver logs a warning and falls
+  back to v3 rather than crashing on missing `textual` or `plotext`.
 - The v4 dashboard uses the threaded integration model from the spec. The
   synchronous orchestrator loop continues to poll; after each poll it publishes a
   deep-copied `_dashboard_snapshot` for the Textual app.

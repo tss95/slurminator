@@ -1,4 +1,5 @@
 import copy
+import importlib
 import logging
 import os
 import time
@@ -374,8 +375,9 @@ class HPCOrchestrator:
                     time.sleep(self.poll_interval)
             else:
                 DashboardCls = self._resolve_dashboard_cls()
-                dashboard_kwargs = {"n_recent": 0, "ui_version": self.dashboard_ui}
-                if str(self.dashboard_ui).strip().lower() == "v4":
+                effective_dashboard_ui = self._effective_dashboard_ui(DashboardCls)
+                dashboard_kwargs = {"n_recent": 0, "ui_version": effective_dashboard_ui}
+                if effective_dashboard_ui == "v4":
                     dashboard_kwargs["sparkline_thresholds"] = getattr(self.dashboard_settings, "sparkline", None)
                 dash = DashboardCls(**dashboard_kwargs)
 
@@ -440,14 +442,28 @@ class HPCOrchestrator:
     def _resolve_dashboard_cls(self):
         """Resolve the concrete dashboard class for the requested UI version."""
         if str(self.dashboard_ui).strip().lower() == "v4":
-            from slurminator.dashboard_v4.app import TextualDashboardApp
-
-            return TextualDashboardApp
+            try:
+                return importlib.import_module("slurminator.dashboard_v4.app").TextualDashboardApp
+            except ModuleNotFoundError as exc:
+                if exc.name not in {"textual", "plotext"}:
+                    raise
+                logger.warning(
+                    "Dashboard v4 dependency %r is not installed; falling back to dashboard v3. "
+                    "Reinstall Slurminator to use v4: python -m pip install -e .",
+                    exc.name,
+                )
         if self.dashboard_cls is not None:
             return self.dashboard_cls
         from slurminator.ui_dashboard import TerminalDashboard
 
         return TerminalDashboard
+
+    def _effective_dashboard_ui(self, dashboard_cls: Type[Any]) -> str:
+        """Return the UI version string accepted by the resolved dashboard class."""
+        requested = str(self.dashboard_ui).strip().lower() or "v3"
+        if requested == "v4" and getattr(dashboard_cls, "__module__", "") != "slurminator.dashboard_v4.app":
+            return "v3"
+        return requested
 
     def _publish_dashboard_snapshot(self, exps: list[dict[str, Any]]) -> None:
         """Publish a copy of the latest ledger for threaded dashboard readers."""

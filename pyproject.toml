@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "slurminator"
-version = "0.1.0"
+version = "0.2.0"
 authors = [{ name = "Tord Sture Stangeland" }]
 maintainers = [{ name = "Tord Sture Stangeland" }]
 description = "Reusable SLURM/HPC experiment orchestration package."

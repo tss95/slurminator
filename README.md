@@ -72,6 +72,9 @@ python -m pip install -e ../slurminator
 Dashboard v4 is the default terminal UI and its Textual/plotext dependencies
 are installed with the base package. Dashboard v3 remains available with
 `--dashboard-ui v3` for legacy Rich-only sessions.
+If an existing editable/source checkout pulls v4-default code before reinstalling
+dependencies, Slurminator logs a warning and falls back to v3 instead of
+crashing.
 
 Install from GitHub:
 
