@@ -51,8 +51,9 @@ spec left room for implementation detail.
 
 ## Slice 4: Textual Dashboard Skeleton
 
-- Textual is optional and lives in the `v4` extra. The `dev` extra includes it
-  so tests can cover v4, but default v2/v3 users do not need to install Textual.
+- Textual initially lived in the `v4` extra while v4 was opt-in. After live
+  review made v4 the default dashboard, Textual and plotext were promoted to
+  base dependencies so a default install can launch the default UI.
 - The v4 dashboard uses the threaded integration model from the spec. The
   synchronous orchestrator loop continues to poll; after each poll it publishes a
   deep-copied `_dashboard_snapshot` for the Textual app.
@@ -74,7 +75,9 @@ spec left room for implementation detail.
   release was `1.0.1` from 2024-11-30 and its repository had open issues plus a
   documented repeated-build/log-scale limitation. Direct `plotext` keeps
   log-scale behavior under Slurminator control.
-- `plotext` is added only to the `v4` and `dev` extras.
+- `plotext` initially lived only in the `v4` and `dev` extras. Follow-up:
+  after v4 became the default dashboard, `plotext` moved to base dependencies
+  alongside Textual.
 - `HPCOrchestrator.force_read_full_history(exp)` owns construction of
   `StatusIngestContext`, so Textual screens do not need to know status-ingest
   internals.
@@ -176,6 +179,10 @@ spec left room for implementation detail.
   scheduler marks them terminal.
 - `Return` is present as an explicit non-destructive menu item for leaving the
   per-run menu; `Esc` remains available as a shortcut.
+- The per-run menu is treated as a launcher for plot, detail, and log screens.
+  Selecting one of those views dismisses the menu first, so `Esc` from the
+  child screen returns directly to the summary table instead of back into the
+  launcher.
 - A relaunch resets the selected terminal experiment to `PENDING`, clears stale
   job/log/history fields, keeps the experiment assignment and sweep parameters,
   and records lightweight audit fields (`manual_relaunch_count`,
@@ -230,11 +237,15 @@ spec left room for implementation detail.
   keys. Live runs exposed that exact-only lookup could leave the trajectory
   blank even when the history file contained metric points.
 - Follow-up live review exposed that falling through to arbitrary history keys
-  made the trajectory column change meaning over time, for example showing
-  total loss until a sparse probe metric appeared. The trajectory column now
-  tracks only the declared primary metric, resolves shortforms to raw history
-  keys, and coalesces consecutive repeated values so probe metrics are not
+  made trajectory cells change meaning over time, for example showing total
+  loss until a sparse probe metric appeared. The home table now tracks declared
+  primary and secondary metrics only, resolves shortforms to raw history keys,
+  and coalesces consecutive repeated values so sparse probe metrics are not
   visually duplicated on every status write between probe updates.
+- Trajectory sparklines resample the available metric history across the full
+  cell width instead of padding short histories with empty placeholder dots.
+  This keeps sparse-but-valid trajectories visible without implying additional
+  probe updates occurred.
 - `MetricInfo.best_key` is part of the in-development v1.1 status schema so v4
   can restore the v3-style `current (best)` metric cells for primary and
   secondary metrics. For older in-flight rows missing `best_key`, v4 infers the
@@ -245,6 +256,34 @@ spec left room for implementation detail.
   now forces `PMT_FORCE_RELOAD=1` when sourcing the env script so newly
   submitted jobs pick up the sibling Slurminator source and write current
   status/history schema files.
+- The log-tail screen supports `c` to copy selected Textual text when present,
+  or the currently loaded log tail otherwise. Textual owns mouse events while
+  the dashboard is active, so this gives operators a reliable copy path through
+  Textual's clipboard plus tmux OSC 52 passthrough without requiring native
+  terminal selection to work inside the alternate-screen UI.
+- Mouse-wheel scrolling remains the default in log tail. For native terminal
+  drag-selection, the log screen adds a temporary `m` terminal-selection mode:
+  it disables terminal mouse reporting until `m` is pressed again, allowing the
+  terminal/tmux to own drag-selection while preserving dashboard mouse scrolling
+  in normal mode.
+- The primary cross-viewport log-copy path is in-app range selection rather
+  than terminal drag-selection. `Space` marks a start line at the top visible
+  log line, operators can keep scrolling with the mouse wheel or keyboard,
+  `Space` can mark the end, and `y`/`c` copies the rendered line range. This
+  avoids the terminal limitation where drag-selection and mouse scrolling
+  compete for the same mouse events.
+- The log screen defaults to stdout because stderr is often dominated by
+  environment startup noise (Apptainer, W&B, Matplotlib, deprecation warnings).
+  Pressing `s` cycles stdout -> stderr -> stdout+stderr. Source switching
+  clears the current log selection and force-reads the latest tail for the new
+  source; it does not filter or rewrite log contents. Single-source stdout and
+  stderr views display the raw file contents without synthetic file headers;
+  combined mode keeps headers so the two streams remain distinguishable.
+- Live log updates pause visually when the operator scrolls away from the
+  bottom or starts an in-app selection. New tail text is buffered and the help
+  bar reports the buffered line count; scrolling back to the bottom flushes the
+  buffer and resumes live-follow. This keeps the log from jumping while someone
+  is reading or selecting older output.
 
 ## Known Terminal Compatibility
 

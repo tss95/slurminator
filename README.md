@@ -69,16 +69,9 @@ Editable install from a sibling checkout:
 python -m pip install -e ../slurminator
 ```
 
-Install the optional Textual dashboard v4 dependencies:
-
-```bash
-python -m pip install -e "../slurminator[v4]"
-```
-
-Dashboard v4 works best in a modern terminal. It includes a resize polling
-fallback for tmux sessions that still use the legacy `screen-256color` default.
-See the [Dashboard v4 requirements](#dashboard-v4-requirements) section for
-details.
+Dashboard v4 is the default terminal UI and its Textual/plotext dependencies
+are installed with the base package. Dashboard v3 remains available with
+`--dashboard-ui v3` for legacy Rich-only sessions.
 
 Install from GitHub:
 
@@ -211,6 +204,16 @@ Slurminator loads two user-facing YAML files:
   resource defaults, project paths, dataset pinning, and per-cluster environment.
 - `orchestrator_config.yaml` is optional and contains dashboard/orchestrator
   behavior knobs. Missing values use package defaults.
+
+For example, v4 is the package default, but a user config can keep a session on
+the legacy Rich dashboard:
+
+```yaml
+dashboard:
+  ui_version: v3
+```
+
+The CLI flag `--dashboard-ui` overrides this config value for one run.
 
 Config lookup order:
 
@@ -379,11 +382,13 @@ Jobs can write live status files using Slurminator's callback helpers under:
 
 ```text
 $SAVE_PATH/.orchestrator_status[/sweep_<sweep_id>]/status_<job_id>.json
+$SAVE_PATH/.orchestrator_status[/sweep_<sweep_id>]/history_<job_id>.jsonl
 ```
 
 The target schema lives in `slurminator.schemas.status_schema`. Status files are
-optional but improve dashboard progress, metrics, links, and live speed display.
-Without them, scheduler state still drives terminal status.
+optional but power dashboard progress, metrics, links, live speed display,
+metric trajectories, and per-run plots. Without them, scheduler state still
+drives terminal status, but v4 has little run-internal metric history to show.
 
 ### Wiring The Metrics Callback
 
@@ -445,11 +450,18 @@ not as an authoritative accounting statement.
 
 ## Dashboard v4
 
-Dashboard v4 is an optional Textual interface. Install it with
-`pip install "slurminator[v4]"`, then launch with `--dashboard-ui v4`. The
-default `--dashboard-ui v3` remains Rich-based and does not require Textual.
+Dashboard v4 is the default Textual interface. Launch Slurminator normally to
+use it, or pass `--dashboard-ui v3` for the legacy Rich dashboard and
+`--dashboard-ui v2` for the older compact dashboard.
 Phase 4 implementation decisions are tracked in
 [`docs/slurminator_ui_v4_phase4_decisions.md`](docs/slurminator_ui_v4_phase4_decisions.md).
+
+The v4 dashboard can show scheduler state and SLURM log tails without a
+training callback. Live progress, primary/secondary metric columns,
+best-so-far values, trajectory sparklines, per-run plots, tracker links, and
+detail-screen metric tables require a job-side status callback. See
+[`docs/status_callback.md`](docs/status_callback.md) before integrating a new
+project.
 
 ### Dashboard v4 Requirements
 

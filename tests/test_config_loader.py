@@ -47,6 +47,7 @@ def test_load_user_config_finds_home_hpc_and_defaults_orchestrator(tmp_path: Pat
     assert loaded.cluster_configs[HPCType.FOX].partition == HPCPartition.ACCEL
     assert loaded.cluster_configs[HPCType.FOX].exclude_nodes == ["gpu-1", "gpu-2"]
     assert isinstance(loaded.orchestrator, OrchestratorSettings)
+    assert loaded.orchestrator.dashboard.ui_version == "v4"
     assert loaded.orchestrator.dashboard.timeout_risk.min_runtime_seconds == 15 * 60
     assert HPC_CONFIGS[HPCType.FOX].account == "acct"
 

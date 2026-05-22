@@ -17,7 +17,13 @@ from slurminator.experiment_policy import resolve_extra_remote_dirs, resolve_res
 from slurminator.hpc_state import is_terminal_status
 from slurminator.plugins import CommandBuildContext, DefaultOrchestratorPlugin, OrchestratorPlugin
 from slurminator.connection_manager import HPCConnectionManager, HPCConnectionConfig
-from slurminator.log_gathering import LogGatheringContext, LogTailReadResult, gather_logs, read_log_tail_incremental
+from slurminator.log_gathering import (
+    LogGatheringContext,
+    LogSource,
+    LogTailReadResult,
+    gather_logs,
+    read_log_tail_incremental,
+)
 from slurminator.reassignment import ReassignmentContext, maybe_reassign_experiments
 from slurminator.scheduler_polling import expand_short, map_state, poll_hpc, update_scheduler_statuses
 from slurminator.state_store import ExperimentStateStore, replace_exp_in_list
@@ -83,7 +89,7 @@ class HPCOrchestrator:
         time_hours_override: Optional[int] = None,
         memory_gb_override: Optional[int] = None,
         debug: bool = False,
-        dashboard_ui: str = "v3",
+        dashboard_ui: str = "v4",
         *,
         connection_manager: Optional["HPCConnectionManager"] = None,
         retry_timeout_with_estimated_time: bool = False,
@@ -764,7 +770,12 @@ class HPCOrchestrator:
         force_read_full_history_from_status(exp, context)
 
     def read_log_tail_for(
-        self, exp: dict[str, Any], *, lines: int = 500, offsets: Mapping[str, int] | None = None
+        self,
+        exp: dict[str, Any],
+        *,
+        lines: int = 500,
+        offsets: Mapping[str, int] | None = None,
+        source: LogSource = "combined",
     ) -> LogTailReadResult:
         """Read recent or newly-appended Slurm log text for a dashboard screen."""
         job_id = exp.get("job_id")
@@ -781,7 +792,9 @@ class HPCOrchestrator:
             timeout_retry_buffer=self.timeout_retry_buffer,
             timeout_retry_max_attempts=self.timeout_retry_max_attempts,
         )
-        return read_log_tail_incremental(exp, str(job_id), hpc_type, context, lines=lines, offsets=offsets)
+        return read_log_tail_incremental(
+            exp, str(job_id), hpc_type, context, lines=lines, offsets=offsets, source=source
+        )
 
     @staticmethod
     def _coerce_hpc_type(value: object) -> HPCType | None:

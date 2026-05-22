@@ -30,16 +30,16 @@ def render_sparkline(
     """Render a single-line block-character sparkline with regression-colored output."""
     safe_width = max(int(width), 1)
     vals = [_coerce_float(value) for value in values]
-    vals = [value for value in vals if value is not None][-safe_width:]
+    vals = [value for value in vals if value is not None]
     if not vals:
         return Text("-" * safe_width, style="dim")
 
-    lo = min(vals)
-    hi = max(vals)
+    display_vals = _resample_values(vals, safe_width)
+    lo = min(display_vals)
+    hi = max(display_vals)
     value_range = hi - lo if hi > lo else 1.0
     n_chars = len(BLOCK_CHARS)
-    chars = [BLOCK_CHARS[min(n_chars - 1, int(((value - lo) / value_range) * (n_chars - 1)))] for value in vals]
-    chars += ["."] * (safe_width - len(chars))
+    chars = [BLOCK_CHARS[min(n_chars - 1, int(((value - lo) / value_range) * (n_chars - 1)))] for value in display_vals]
 
     color = slope_color(vals, higher_better=higher_better, thresholds=thresholds)
     return Text("".join(chars), style=color)
@@ -93,6 +93,27 @@ def _residual_norm(values: list[float], *, slope: float, intercept: float) -> fl
     residuals = [value - (slope * index + intercept) for index, value in enumerate(values)]
     rms = math.sqrt(sum(residual * residual for residual in residuals) / len(residuals))
     return rms / value_range
+
+
+def _resample_values(values: list[float], width: int) -> list[float]:
+    """Resample values across the requested width without adding empty padding."""
+    if width <= 1:
+        return [values[-1]]
+    if len(values) == 1:
+        return [values[0]] * width
+
+    max_source_index = len(values) - 1
+    sampled: list[float] = []
+    for output_index in range(width):
+        source_position = output_index * max_source_index / (width - 1)
+        left_index = int(math.floor(source_position))
+        right_index = min(left_index + 1, max_source_index)
+        fraction = source_position - left_index
+        if right_index == left_index:
+            sampled.append(values[left_index])
+        else:
+            sampled.append(values[left_index] + (values[right_index] - values[left_index]) * fraction)
+    return sampled
 
 
 def _coerce_thresholds(thresholds: SparklineThresholds | object | None) -> SparklineThresholds:

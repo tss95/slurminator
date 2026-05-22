@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from shlex import quote
-from typing import Any
+from typing import Any, Literal
 
 from slurminator.experiments import ExperimentStatus
 from slurminator.config import HPCType
@@ -19,6 +19,7 @@ from slurminator.timeout_policy import apply_timeout_policy
 logger = logging.getLogger("slurminator")
 
 IsLocalHPC = Callable[[HPCType], bool]
+LogSource = Literal["stdout", "stderr", "combined"]
 
 
 @dataclass
@@ -145,6 +146,7 @@ def read_log_tail_incremental(
     *,
     lines: int = 500,
     offsets: Mapping[str, int] | None = None,
+    source: LogSource = "combined",
 ) -> LogTailReadResult:
     """Read recent or newly-appended Slurm stdout/stderr log text."""
     out_dir = exp.get("output_dir")
@@ -152,10 +154,11 @@ def read_log_tail_incremental(
         return LogTailReadResult(text="", offsets={})
 
     previous_offsets = dict(offsets or {})
-    paths = {"stdout": Path(out_dir) / f"slurm-{job_id}.out", "stderr": Path(out_dir) / f"slurm-{job_id}.err"}
+    paths = _log_paths(out_dir, job_id, source=source)
     new_offsets: dict[str, int] = {}
     chunks: list[str] = []
     truncated = False
+    include_headers = source == "combined"
 
     for label, path in paths.items():
         previous_offset = max(int(previous_offsets.get(label, 0) or 0), 0)
@@ -175,9 +178,25 @@ def read_log_tail_incremental(
             text = ""
 
         if text:
-            chunks.append(f"===== {label}: {path} =====\n{text.rstrip()}\n")
+            body = text.rstrip()
+            if include_headers:
+                chunks.append(f"===== {label}: {path} =====\n{body}\n")
+            else:
+                chunks.append(body)
 
     return LogTailReadResult(text="\n".join(chunks).strip(), offsets=new_offsets, truncated=truncated)
+
+
+def _log_paths(out_dir: object, job_id: str, *, source: LogSource) -> dict[str, Path]:
+    all_paths = {
+        "stdout": Path(str(out_dir)) / f"slurm-{job_id}.out",
+        "stderr": Path(str(out_dir)) / f"slurm-{job_id}.err",
+    }
+    if source == "stdout":
+        return {"stdout": all_paths["stdout"]}
+    if source == "stderr":
+        return {"stderr": all_paths["stderr"]}
+    return all_paths
 
 
 def _log_file_size(path: Path, hpc_type: HPCType, context: LogGatheringContext) -> int:
@@ -205,4 +224,11 @@ def _run_log_command(command: str, hpc_type: HPCType, context: LogGatheringConte
     return out
 
 
-__all__ = ["LogGatheringContext", "LogTailReadResult", "gather_logs", "read_log_tail", "read_log_tail_incremental"]
+__all__ = [
+    "LogGatheringContext",
+    "LogSource",
+    "LogTailReadResult",
+    "gather_logs",
+    "read_log_tail",
+    "read_log_tail_incremental",
+]

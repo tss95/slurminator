@@ -37,9 +37,14 @@ DETAIL_BINDINGS = [
 ]
 
 LOG_BINDINGS = [
-    Binding("escape", "app.pop_screen", "Back"),
+    Binding("escape", "cancel_selection_or_back", "Back"),
     Binding("g", "app.global_menu", "Global"),
     Binding("r", "refresh", "Refresh"),
+    Binding("s", "toggle_log_source", "Source"),
+    Binding("c", "copy_log", "Copy log"),
+    Binding("y", "copy_log_selection", "Copy selection"),
+    Binding("space", "mark_log_selection", "Mark selection"),
+    Binding("m", "toggle_terminal_selection", "Mouse select"),
     Binding("up", "scroll_up", "Scroll up"),
     Binding("down", "scroll_down", "Scroll down"),
 ]

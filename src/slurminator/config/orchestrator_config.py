@@ -31,7 +31,7 @@ class SparklineSettings:
 class DashboardSettings:
     """Dashboard behavior settings."""
 
-    ui_version: str = "v3"
+    ui_version: str = "v4"
     poll_interval_seconds: int = 30
     timeout_risk: TimeoutRiskSettings = field(default_factory=TimeoutRiskSettings)
     sparkline: SparklineSettings = field(default_factory=SparklineSettings)

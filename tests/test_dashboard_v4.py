@@ -13,7 +13,7 @@ import pytest
 from rich.text import Text
 from textual import events
 from textual.css.query import NoMatches
-from textual.widgets import Button, Input, Label, ListView
+from textual.widgets import Button, Input, Label, ListView, RichLog, Static
 
 from slurminator.command_queue import Command
 from slurminator.config import HPCType
@@ -31,10 +31,16 @@ from slurminator.dashboard_v4.forms.relaunch_form import RelaunchFormScreen
 from slurminator.dashboard_v4.forms.settings_form import SettingsFormScreen
 from slurminator.dashboard_v4.global_menu import GlobalMenuScreen
 from slurminator.dashboard_v4.help_screen import HelpScreen
-from slurminator.dashboard_v4.log_screen import PerRunLogScreen
+from slurminator.dashboard_v4.home_screen import HomeScreen
+from slurminator.dashboard_v4.log_screen import LOG_SELECTION_BOUNDARY_STYLE, PerRunLogScreen
 from slurminator.dashboard_v4 import plot_screen as plot_screen_module
 from slurminator.dashboard_v4.per_run_menu import PerRunMenuScreen
 from slurminator.dashboard_v4.plot_screen import PerRunPlotScreen
+from slurminator.dashboard_v4.terminal_mouse import (
+    DISABLE_MOUSE_REPORTING,
+    ENABLE_MOUSE_REPORTING,
+    set_terminal_mouse_reporting,
+)
 from slurminator.dashboard_v4.widgets import experiments_table as experiments_table_module
 from slurminator.dashboard_v4.widgets.sparkline import render_sparkline, slope_color
 from slurminator.dashboard_v4.widgets import ExperimentsTable
@@ -191,16 +197,19 @@ def test_submit_command_writes_pending_command(tmp_path: Path) -> None:
     assert cmd.command_id in files[0].read_text(encoding="utf-8")
 
 
-def test_orchestrator_dashboard_resolver_keeps_v3_and_resolves_v4(tmp_path: Path) -> None:
+def test_orchestrator_dashboard_resolver_defaults_to_v4_and_keeps_legacy_v3(tmp_path: Path) -> None:
     class PluginDashboard:
         pass
 
+    orch_default = _orchestrator(tmp_path / "default")
     orch_v3 = _orchestrator(tmp_path / "v3")
+    orch_v3.dashboard_ui = "v3"
     orch_v3.dashboard_cls = PluginDashboard
     orch_v4 = _orchestrator(tmp_path / "v4")
     orch_v4.dashboard_cls = PluginDashboard
     orch_v4.dashboard_ui = "v4"
 
+    assert orch_default._resolve_dashboard_cls() is TextualDashboardApp
     assert orch_v3._resolve_dashboard_cls() is PluginDashboard
     assert orch_v4._resolve_dashboard_cls() is TextualDashboardApp
 
@@ -218,7 +227,7 @@ def test_textual_home_table_renders_and_cursor_moves(tmp_path: Path) -> None:
             table = app.screen.query_one(ExperimentsTable)
             assert table.row_count == 2
             assert table.get_row_at(0)[0] == "exp-1"
-            assert len(table.get_row_at(0)) == 9
+            assert len(table.get_row_at(0)) == 10
             assert table.cursor_row == 0
 
             await pilot.press("down")
@@ -317,6 +326,7 @@ def test_textual_home_table_uses_status_colors_metric_colors_and_v3_order(tmp_pa
             assert primary_cell.style == "green"
             assert table.get_row_at(0)[4] == "1/4  25.0%"
             assert str(list(table.columns.values())[5].label) == "vloss"
+            assert str(list(table.columns.values())[6].label) == "vloss_traj"
 
     asyncio.run(run())
 
@@ -430,7 +440,11 @@ def test_textual_home_table_renders_sparkline_and_toggles_column(tmp_path: Path)
             trajectory = table.get_row_at(0)[6]
             assert isinstance(trajectory, Text)
             assert trajectory.style == "dim"
-            assert trajectory.plain.endswith("." * 18)
+            assert len(trajectory.plain) == 20
+            assert "." not in trajectory.plain
+
+            secondary_trajectory = table.get_row_at(0)[8]
+            assert secondary_trajectory == "-"
 
             await pilot.press("s")
             await pilot.pause(0.1)
@@ -440,7 +454,31 @@ def test_textual_home_table_renders_sparkline_and_toggles_column(tmp_path: Path)
             await pilot.press("s")
             await pilot.pause(0.1)
             assert app.sparkline_enabled is True
-            assert len(table.get_row_at(0)) == 9
+            assert len(table.get_row_at(0)) == 10
+
+    asyncio.run(run())
+
+
+def test_textual_home_table_renders_secondary_metric_trajectory(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        exp = dict(_experiments()[0])
+        exp["secondary_metric_name"] = "acc"
+        exp["secondary_metric_value"] = 0.6
+        orch._publish_dashboard_snapshot([exp])
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.pause(0.2)
+            table = app.screen.query_one(ExperimentsTable)
+            secondary_trajectory = table.get_row_at(0)[8]
+            assert isinstance(secondary_trajectory, Text)
+            assert len(secondary_trajectory.plain) == 20
+            assert "." not in secondary_trajectory.plain
+            assert secondary_trajectory.plain != "-" * 20
+            assert str(list(table.columns.values())[7].label) == "acc"
+            assert str(list(table.columns.values())[8].label) == "acc_traj"
 
     asyncio.run(run())
 
@@ -826,6 +864,15 @@ def test_sparkline_color_matches_metric_direction() -> None:
     assert slope_color([0.1, 0.4, 0.4, 0.1], higher_better=True) == "yellow"
 
 
+def test_sparkline_resamples_sparse_values_to_full_width() -> None:
+    sparse = render_sparkline([1.0, 2.0], width=12, higher_better=True)
+
+    assert len(sparse.plain) == 12
+    assert "." not in sparse.plain
+    assert sparse.plain[0] == "▁"
+    assert sparse.plain[-1] == "█"
+
+
 def test_textual_dashboard_mount_render_contract(tmp_path: Path) -> None:
     orch = _orchestrator(tmp_path)
     app = TextualDashboardApp(refresh_interval=0.05, headless=True)
@@ -1058,6 +1105,44 @@ def test_tmux_clipboard_passthrough_only_writes_inside_tmux(monkeypatch) -> None
     assert driver.writes == [tmux_clipboard_passthrough_sequence("exp-1")]
 
 
+def test_terminal_mouse_reporting_helper_uses_driver_methods() -> None:
+    class FakeDriver:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def _enable_mouse_support(self) -> None:
+            self.calls.append("enable")
+
+        def _disable_mouse_support(self) -> None:
+            self.calls.append("disable")
+
+    driver = FakeDriver()
+
+    assert set_terminal_mouse_reporting(driver, enabled=False) is True
+    assert set_terminal_mouse_reporting(driver, enabled=True) is True
+    assert driver.calls == ["disable", "enable"]
+
+
+def test_terminal_mouse_reporting_helper_falls_back_to_sequences() -> None:
+    class FakeDriver:
+        def __init__(self) -> None:
+            self.writes: list[str] = []
+            self.flushed = 0
+
+        def write(self, text: str) -> None:
+            self.writes.append(text)
+
+        def flush(self) -> None:
+            self.flushed += 1
+
+    driver = FakeDriver()
+
+    assert set_terminal_mouse_reporting(driver, enabled=False) is True
+    assert set_terminal_mouse_reporting(driver, enabled=True) is True
+    assert driver.writes == [DISABLE_MOUSE_REPORTING, ENABLE_MOUSE_REPORTING]
+    assert driver.flushed == 2
+
+
 def test_textual_per_run_menu_opens_plot_screen_for_selected_run(tmp_path: Path) -> None:
     async def run() -> None:
         orch = _orchestrator(tmp_path)
@@ -1080,7 +1165,7 @@ def test_textual_per_run_menu_opens_plot_screen_for_selected_run(tmp_path: Path)
 
             await pilot.press("escape")
             await pilot.pause(0.1)
-            assert isinstance(app.screen, PerRunMenuScreen)
+            assert isinstance(app.screen, HomeScreen)
 
     asyncio.run(run())
 
@@ -1109,8 +1194,11 @@ def test_textual_per_run_menu_opens_detail_and_log_screens(tmp_path: Path) -> No
 
             await pilot.press("escape")
             await pilot.pause(0.1)
-            assert isinstance(app.screen, PerRunMenuScreen)
+            assert isinstance(app.screen, HomeScreen)
 
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, PerRunMenuScreen)
             app.screen.query_one("#per-run-actions").index = 2
             await pilot.press("enter")
             await pilot.pause(0.2)
@@ -1119,7 +1207,7 @@ def test_textual_per_run_menu_opens_detail_and_log_screens(tmp_path: Path) -> No
 
             await pilot.press("escape")
             await pilot.pause(0.1)
-            assert isinstance(app.screen, PerRunMenuScreen)
+            assert isinstance(app.screen, HomeScreen)
 
     asyncio.run(run())
 
@@ -1359,9 +1447,8 @@ def test_textual_log_screen_tails_and_appends_new_lines(tmp_path: Path) -> None:
             screen = app.screen
             assert isinstance(screen, PerRunLogScreen)
             assert "out2" in screen._last_log_text
-            assert "err1" in screen._last_log_text
+            assert "err1" not in screen._last_log_text
             assert screen._offsets["stdout"] == len(files["slurm-12345.out"].encode("utf-8"))
-            assert screen._offsets["stderr"] == len(files["slurm-12345.err"].encode("utf-8"))
 
             files["slurm-12345.out"] += "out3\n"
             screen.refresh_log()
@@ -1371,7 +1458,145 @@ def test_textual_log_screen_tails_and_appends_new_lines(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-def test_textual_log_screen_scrollback_preserves_position_when_scrolled_up(tmp_path: Path) -> None:
+def test_textual_log_screen_toggles_stdout_stderr_and_combined_sources(tmp_path: Path) -> None:
+    async def run() -> None:
+        files = {"slurm-12345.out": "out1\nout2\n", "slurm-12345.err": "err1\nerr2\n"}
+        connection = FakeConnection(files=files)
+        orch = _orchestrator(tmp_path, connection=connection)
+        app = TextualDashboardApp(refresh_interval=60.0)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 36)) as pilot:
+            await app.push_screen(PerRunLogScreen(_experiments()[0]))
+            await pilot.pause(0.2)
+            screen = app.screen
+            assert isinstance(screen, PerRunLogScreen)
+            assert screen.log_source == "stdout"
+            assert "out2" in screen._last_log_text
+            assert "err2" not in screen._last_log_text
+            assert "=====" not in screen._last_log_text
+            assert set(screen._offsets) == {"stdout"}
+            assert "Source: stdout" in str(screen.query_one("#log-copy-help", Static).render())
+
+            await pilot.press("s")
+            await pilot.pause(0.1)
+            assert screen.log_source == "stderr"
+            assert "err2" in screen._last_log_text
+            assert "out2" not in screen._last_log_text
+            assert "=====" not in screen._last_log_text
+            assert set(screen._offsets) == {"stderr"}
+
+            await pilot.press("s")
+            await pilot.pause(0.1)
+            assert screen.log_source == "combined"
+            assert "out2" in screen._last_log_text
+            assert "err2" in screen._last_log_text
+            assert "===== stdout:" in screen._last_log_text
+            assert "===== stderr:" in screen._last_log_text
+            assert set(screen._offsets) == {"stdout", "stderr"}
+
+    asyncio.run(run())
+
+
+def test_textual_log_screen_copy_uses_selected_text_or_loaded_tail(tmp_path: Path) -> None:
+    async def run() -> None:
+        files = {"slurm-12345.out": "out1\nout2\n", "slurm-12345.err": "err1\n"}
+        connection = FakeConnection(files=files)
+        orch = _orchestrator(tmp_path, connection=connection)
+        app = TextualDashboardApp(refresh_interval=60.0)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 36)) as pilot:
+            await app.push_screen(PerRunLogScreen(_experiments()[0]))
+            await pilot.pause(0.2)
+            screen = app.screen
+            assert isinstance(screen, PerRunLogScreen)
+
+            await pilot.press("c")
+            await pilot.pause(0.1)
+            assert app.clipboard == screen._last_log_text.rstrip("\n")
+
+            screen.get_selected_text = lambda: "selected error line"  # type: ignore[method-assign]
+            screen.action_copy_log()
+            await pilot.pause(0.1)
+            assert app.clipboard == "selected error line"
+
+    asyncio.run(run())
+
+
+def test_textual_log_screen_space_selection_copies_scrolled_range(tmp_path: Path) -> None:
+    async def run() -> None:
+        lines = [f"line-{index}" for index in range(20)]
+        files = {"slurm-12345.out": "\n".join(lines) + "\n", "slurm-12345.err": ""}
+        connection = FakeConnection(files=files)
+        orch = _orchestrator(tmp_path, connection=connection)
+        app = TextualDashboardApp(refresh_interval=60.0)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(80, 12)) as pilot:
+            await app.push_screen(PerRunLogScreen(_experiments()[0]))
+            await pilot.pause(0.2)
+            screen = app.screen
+            assert isinstance(screen, PerRunLogScreen)
+            log = screen.query_one("#log", RichLog)
+
+            log.scroll_to(y=2, animate=False, immediate=True)
+            await pilot.pause(0.1)
+            assert log.render_line(0).text.startswith("  3 │ ")
+            await pilot.press("space")
+            await pilot.pause(0.1)
+            assert screen._selection_anchor_line == 2
+            assert "Selection active" in str(screen.query_one("#log-copy-help", Static).render())
+            assert any(
+                str(segment.style) == str(LOG_SELECTION_BOUNDARY_STYLE) for segment in log.render_line(0)._segments
+            )
+
+            log.scroll_to(y=5, animate=False, immediate=True)
+            await pilot.pause(0.1)
+            assert log.render_line(0).text.startswith("  6 │ ")
+            await pilot.press("space")
+            await pilot.pause(0.1)
+            assert screen._selection_end_line == 5
+            assert screen._selection_style_for_line(1) is None
+            assert screen._selection_style_for_line(2) is not None
+            assert screen._selection_style_for_line(3) is not None
+            assert screen._selection_style_for_line(5) is not None
+            expected_selection = "\n".join(line.rstrip() for line in screen._rendered_log_lines()[2:6]).strip("\n")
+
+            await pilot.press("y")
+            await pilot.pause(0.1)
+            assert screen._last_selection_range == (2, 5)
+            assert app.clipboard == expected_selection
+
+    asyncio.run(run())
+
+
+def test_textual_log_screen_space_selection_uses_pending_scroll_target(tmp_path: Path) -> None:
+    async def run() -> None:
+        lines = [f"line-{index}" for index in range(20)]
+        files = {"slurm-12345.out": "\n".join(lines) + "\n", "slurm-12345.err": ""}
+        connection = FakeConnection(files=files)
+        orch = _orchestrator(tmp_path, connection=connection)
+        app = TextualDashboardApp(refresh_interval=60.0)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(80, 12)) as pilot:
+            await app.push_screen(PerRunLogScreen(_experiments()[0]))
+            await pilot.pause(0.2)
+            screen = app.screen
+            assert isinstance(screen, PerRunLogScreen)
+            log = screen.query_one("#log", RichLog)
+
+            log.scroll_to(y=4, animate=True, force=True)
+            assert int(log.scroll_y) != 4
+            await pilot.press("space")
+            await pilot.pause(0.1)
+            assert screen._selection_anchor_line == 4
+
+    asyncio.run(run())
+
+
+def test_textual_log_screen_escape_cancels_selection_before_returning(tmp_path: Path) -> None:
     async def run() -> None:
         files = {"slurm-12345.out": "line1\nline2\n", "slurm-12345.err": ""}
         connection = FakeConnection(files=files)
@@ -1384,14 +1609,123 @@ def test_textual_log_screen_scrollback_preserves_position_when_scrolled_up(tmp_p
             await pilot.pause(0.2)
             screen = app.screen
             assert isinstance(screen, PerRunLogScreen)
-            assert screen._auto_scroll is True
 
-            screen.action_scroll_up()
+            await pilot.press("space")
+            await pilot.pause(0.1)
+            assert screen._selection_anchor_line is not None
+
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, PerRunLogScreen)
+            assert screen._selection_anchor_line is None
+            assert "Source: stdout" in str(screen.query_one("#log-copy-help", Static).render())
+
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            assert not isinstance(app.screen, PerRunLogScreen)
+
+    asyncio.run(run())
+
+
+def test_textual_log_screen_terminal_selection_mode_restores_mouse_scrolling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def run() -> None:
+        files = {"slurm-12345.out": "line1\nline2\n", "slurm-12345.err": ""}
+        connection = FakeConnection(files=files)
+        orch = _orchestrator(tmp_path, connection=connection)
+        app = TextualDashboardApp(refresh_interval=60.0)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 36)) as pilot:
+            await app.push_screen(PerRunLogScreen(_experiments()[0]))
+            await pilot.pause(0.2)
+            screen = app.screen
+            assert isinstance(screen, PerRunLogScreen)
+            calls: list[str] = []
+            monkeypatch.setattr(app._driver, "_enable_mouse_support", lambda: calls.append("enable"), raising=False)
+            monkeypatch.setattr(app._driver, "_disable_mouse_support", lambda: calls.append("disable"), raising=False)
+
+            screen.action_toggle_terminal_selection()
+            assert screen._terminal_selection_mode is True
             assert screen._auto_scroll is False
+            assert calls == ["disable"]
+
+            previous_log_text = screen._last_log_text
             files["slurm-12345.out"] += "line3\n"
             screen.refresh_log()
+            assert screen._last_log_text == previous_log_text
+
+            screen.action_toggle_terminal_selection()
             await pilot.pause(0.1)
+            assert screen._terminal_selection_mode is False
+            assert calls == ["disable", "enable"]
             assert "line3" in screen._last_log_text
+
+    asyncio.run(run())
+
+
+def test_textual_log_screen_buffers_updates_while_scrolled_up_and_flushes_at_bottom(tmp_path: Path) -> None:
+    async def run() -> None:
+        lines = [f"line-{index}" for index in range(30)]
+        files = {"slurm-12345.out": "\n".join(lines) + "\n", "slurm-12345.err": ""}
+        connection = FakeConnection(files=files)
+        orch = _orchestrator(tmp_path, connection=connection)
+        app = TextualDashboardApp(refresh_interval=60.0)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(80, 12)) as pilot:
+            await app.push_screen(PerRunLogScreen(_experiments()[0]))
+            await pilot.pause(0.2)
+            screen = app.screen
+            assert isinstance(screen, PerRunLogScreen)
+            log = screen.query_one("#log", RichLog)
+            assert screen._auto_scroll is True
+
+            log.scroll_to(y=2, animate=False, immediate=True)
+            await pilot.pause(0.1)
+            assert screen._auto_scroll is False
+            files["slurm-12345.out"] += "line-30\n"
+            screen.refresh_log()
+            await pilot.pause(0.1)
+            assert "line-30" not in screen._last_log_text
+            assert screen._pending_log_text == "line-30"
+            assert "1 new log line buffered" in str(screen.query_one("#log-copy-help", Static).render())
+            assert screen._auto_scroll is False
+
+            log.scroll_end(animate=False, immediate=True)
+            await pilot.pause(0.1)
+            assert screen._pending_log_text == ""
+            assert "line-30" in screen._last_log_text
+            assert screen._auto_scroll is True
+
+    asyncio.run(run())
+
+
+def test_textual_log_screen_buffers_updates_during_pending_scroll_away_from_bottom(tmp_path: Path) -> None:
+    async def run() -> None:
+        lines = [f"line-{index}" for index in range(30)]
+        files = {"slurm-12345.out": "\n".join(lines) + "\n", "slurm-12345.err": ""}
+        connection = FakeConnection(files=files)
+        orch = _orchestrator(tmp_path, connection=connection)
+        app = TextualDashboardApp(refresh_interval=60.0)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(80, 12)) as pilot:
+            await app.push_screen(PerRunLogScreen(_experiments()[0]))
+            await pilot.pause(0.2)
+            screen = app.screen
+            assert isinstance(screen, PerRunLogScreen)
+            log = screen.query_one("#log", RichLog)
+
+            log.scroll_to(y=2, animate=True, force=True)
+            assert float(log.scroll_target_y) < float(log.max_scroll_y)
+            files["slurm-12345.out"] += "line-30\n"
+            screen.refresh_log()
+            await pilot.pause(0.1)
+
+            assert "line-30" not in screen._last_log_text
+            assert screen._pending_log_text == "line-30"
             assert screen._auto_scroll is False
 
     asyncio.run(run())
@@ -1408,7 +1742,7 @@ def test_textual_log_screen_empty_state(tmp_path: Path) -> None:
             await pilot.pause(0.2)
             screen = app.screen
             assert isinstance(screen, PerRunLogScreen)
-            assert screen._last_log_text == "No data yet"
+            assert screen._last_log_text == "No stdout log data yet"
 
     asyncio.run(run())
 
@@ -1527,9 +1861,37 @@ def test_textual_plot_screen_run_list_selection_switches_run(tmp_path: Path) -> 
             screen = app.screen
             assert isinstance(screen, PerRunPlotScreen)
             runs = screen.query_one("#runs", ListView)
+            runs.focus()
             runs.action_cursor_down()
             await pilot.pause(0.2)
             assert screen._selected_experiment_id == "exp-2"
+
+    asyncio.run(run())
+
+
+def test_textual_plot_screen_overlapping_run_switches_do_not_duplicate_metric_ids(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        exps = _experiments()
+        exps[1]["status"] = ExperimentStatus.COMPLETED
+        exps[1]["history"] = [_history_line(epoch=1, loss=2.0, acc=0.2), _history_line(epoch=2, loss=1.5, acc=0.3)]
+        orch._publish_dashboard_snapshot(exps)
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(140, 36)) as pilot:
+            await app.push_screen(PerRunPlotScreen(exps[0]))
+            await pilot.pause(0.3)
+            screen = app.screen
+            assert isinstance(screen, PerRunPlotScreen)
+
+            await asyncio.gather(screen._activate_experiment(exps[1]), screen._activate_experiment(exps[0]))
+            await pilot.pause(0.1)
+
+            metrics = screen.query_one("#metrics", ListView)
+            metric_ids = [item.id for item in metrics.children]
+            assert len(metric_ids) == len(set(metric_ids))
+            assert [screen._metric_for_item(item) for item in metrics.children] == ["acc", "loss"]
 
     asyncio.run(run())
 
@@ -1673,7 +2035,8 @@ def test_textual_plot_screen_rebuilds_metric_list_without_duplicate_ids(tmp_path
             await pilot.pause(0.1)
 
             metrics = screen.query_one("#metrics", ListView)
-            assert [item.id for item in metrics.children] == ["metric-acc", "metric-loss"]
+            assert len({item.id for item in metrics.children}) == 2
+            assert [screen._metric_for_item(item) for item in metrics.children] == ["acc", "loss"]
             assert screen.metric_keys == ["acc", "loss"]
 
     asyncio.run(run())

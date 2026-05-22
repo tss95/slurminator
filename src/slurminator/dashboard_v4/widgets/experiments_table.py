@@ -75,7 +75,10 @@ class ExperimentsTable(DataTable):
             ]
             if show_sparkline:
                 cells.append(_format_sparkline(exp, primary_name, thresholds=sparkline_thresholds))
-            cells.append(_format_metric(exp, exp.get("secondary_metric_name"), exp.get("secondary_metric_value")))
+            secondary_name = exp.get("secondary_metric_name")
+            cells.append(_format_metric(exp, secondary_name, exp.get("secondary_metric_value")))
+            if show_sparkline:
+                cells.append(_format_sparkline(exp, secondary_name, thresholds=sparkline_thresholds))
             cells.append(_format_queue_delta(exp))
             self.add_row(*cells, key=str(exp.get("experiment_id", len(self.rows))))
         if rows:
@@ -92,9 +95,13 @@ class ExperimentsTable(DataTable):
     def _build_columns(
         self, *, show_sparkline: bool = False, primary_label: str = "Primary", secondary_label: str = "Secondary"
     ) -> None:
-        columns = ["ID", "Dataset", "HPC", "State", "Progress", primary_label, secondary_label, "Queue/DT"]
+        columns = ["ID", "Dataset", "HPC", "State", "Progress", primary_label]
         if show_sparkline:
-            columns.insert(6, "Trajectory")
+            columns.append(_trajectory_column_label(primary_label))
+        columns.append(secondary_label)
+        if show_sparkline:
+            columns.append(_trajectory_column_label(secondary_label))
+        columns.append("Queue/DT")
         self.add_columns(*columns)
 
 
@@ -103,6 +110,10 @@ def _text(value: object, default: str = "") -> str:
         return default
     text = str(value)
     return text if text else default
+
+
+def _trajectory_column_label(metric_label: str) -> str:
+    return f"{metric_label}_traj"
 
 
 def _format_enum(value: object) -> str:
@@ -338,8 +349,8 @@ def _abbr_metric(metric_key: str | None) -> str:
     return replacements.get(name, name)
 
 
-def _format_sparkline(exp: dict[str, Any], primary_metric: object, *, thresholds: SparklineThresholds | object | None):
-    metric_name = _resolve_sparkline_metric(exp, primary_metric)
+def _format_sparkline(exp: dict[str, Any], metric: object, *, thresholds: SparklineThresholds | object | None):
+    metric_name = _resolve_sparkline_metric(exp, metric)
     if metric_name:
         values = _history_metric_values(exp, metric_name, coalesce_repeats=True)
         if values:
@@ -349,11 +360,11 @@ def _format_sparkline(exp: dict[str, Any], primary_metric: object, *, thresholds
     return "-"
 
 
-def _resolve_sparkline_metric(exp: dict[str, Any], primary_metric: object) -> str | None:
-    primary_name = str(primary_metric) if primary_metric else ""
-    if not primary_name:
+def _resolve_sparkline_metric(exp: dict[str, Any], metric: object) -> str | None:
+    metric_name = str(metric) if metric else ""
+    if not metric_name:
         return None
-    return _resolve_history_metric_key(exp, primary_name)
+    return _resolve_history_metric_key(exp, metric_name)
 
 
 def _resolve_history_metric_key(exp: dict[str, Any], metric_name: str) -> str | None:

@@ -6,7 +6,7 @@ from typing import Any
 
 from textual.app import ComposeResult
 from textual.containers import Container
-from textual.screen import ModalScreen
+from textual.screen import ModalScreen, Screen
 from textual.widgets import Label, ListItem, ListView
 
 from slurminator.dashboard_v4.commands import submit_command
@@ -52,11 +52,11 @@ class PerRunMenuScreen(ModalScreen[None]):
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Dispatch placeholder menu selections that are in-scope for this slice."""
         if event.item.id == "view-plots":
-            self.app.push_screen(PerRunPlotScreen(self.exp))
+            self._open_from_home(PerRunPlotScreen(self.exp))
         elif event.item.id == "view-details":
-            self.app.push_screen(PerRunDetailScreen(self.exp))
+            self._open_from_home(PerRunDetailScreen(self.exp))
         elif event.item.id == "view-log-tail":
-            self.app.push_screen(PerRunLogScreen(self.exp))
+            self._open_from_home(PerRunLogScreen(self.exp))
         elif event.item.id == "cancel-run":
             target = {"experiment_id": self.exp.get("experiment_id")}
             if self.exp.get("job_id") is not None:
@@ -69,6 +69,11 @@ class PerRunMenuScreen(ModalScreen[None]):
             self.app.push_screen(SettingsFormScreen(self.exp))
         elif event.item.id == "return":
             self.app.pop_screen()
+
+    def _open_from_home(self, screen: Screen[None]) -> None:
+        """Dismiss the launcher menu, then open the selected run view from home."""
+        self.app.pop_screen()
+        self.app.call_after_refresh(self.app.push_screen, screen)
 
 
 __all__ = ["PerRunMenuScreen"]

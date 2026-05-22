@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 import re
 from typing import Any, Literal
@@ -49,6 +50,10 @@ class PerRunPlotScreen(Screen[None]):
         self._last_yticks: list[float] = []
         self._exp_by_item_id: dict[str, dict[str, Any]] = {}
         self._metric_by_item_id: dict[str, str] = {}
+        self._run_list_lock = asyncio.Lock()
+        self._metric_list_lock = asyncio.Lock()
+        self._run_list_generation = 0
+        self._metric_list_generation = 0
 
     def compose(self) -> ComposeResult:
         """Compose the metric selector and plot panel."""
@@ -146,23 +151,24 @@ class PerRunPlotScreen(Screen[None]):
         return None
 
     async def _rebuild_run_list(self, *, force: bool = False) -> None:
-        self.plot_exps = _plot_run_candidates(self.app.get_dashboard_snapshot(), self.exp)
-        signature = _run_list_signature(self.plot_exps)
-        self._exp_by_item_id = {}
-        for index, exp in enumerate(self.plot_exps):
-            self._exp_by_item_id[_run_item_id(exp, index)] = exp
-        if not force and signature == self._run_list_signature:
-            return
-        self._run_list_signature = signature
-        runs = self.query_one("#runs", ListView)
-        await runs.clear()
-        items: list[ListItem] = []
-        for index, exp in enumerate(self.plot_exps):
-            item_id = _run_item_id(exp, index)
-            items.append(ListItem(Label(_run_label(exp)), id=item_id))
-        if items:
-            await runs.extend(items)
-        self._set_selected_run(self._selected_experiment_id)
+        async with self._run_list_lock:
+            self.plot_exps = _plot_run_candidates(self.app.get_dashboard_snapshot(), self.exp)
+            signature = _run_list_signature(self.plot_exps)
+            if force or signature != self._run_list_signature:
+                self._run_list_signature = signature
+                self._run_list_generation += 1
+                runs = self.query_one("#runs", ListView)
+                await runs.clear()
+                items: list[ListItem] = []
+                for index, exp in enumerate(self.plot_exps):
+                    item_id = _run_item_id(exp, index, self._run_list_generation)
+                    items.append(ListItem(Label(_run_label(exp)), id=item_id))
+                if items:
+                    await runs.extend(items)
+            self._exp_by_item_id = {}
+            for index, exp in enumerate(self.plot_exps):
+                self._exp_by_item_id[_run_item_id(exp, index, self._run_list_generation)] = exp
+            self._set_selected_run(self._selected_experiment_id)
 
     async def _activate_experiment(self, exp: dict[str, Any], *, preserve_metric: bool = True) -> None:
         previous_metric = self.selected_metric if preserve_metric else None
@@ -199,23 +205,29 @@ class PerRunPlotScreen(Screen[None]):
                 exp["history"] = existing_history
 
     async def _rebuild_metric_list(self) -> None:
-        self.metric_keys = _metric_keys(self.history)
-        self._metric_by_item_id = {}
-        metrics = self.query_one("#metrics", ListView)
-        await metrics.clear()
-        items: list[ListItem] = []
-        for key in self.metric_keys:
-            item_id = _metric_item_id(key)
-            self._metric_by_item_id[item_id] = key
-            items.append(ListItem(Label(key), id=item_id))
-        if items:
-            await metrics.extend(items)
-        if self.metric_keys:
-            if self.selected_metric not in self.metric_keys:
-                self.selected_metric = self.metric_keys[0]
-            self._set_selected_metric(self.selected_metric)
-        else:
-            self.selected_metric = None
+        async with self._metric_list_lock:
+            next_metric_keys = _metric_keys(self.history)
+            metrics = self.query_one("#metrics", ListView)
+            needs_rebuild = next_metric_keys != self.metric_keys or len(metrics.children) != len(next_metric_keys)
+            self.metric_keys = next_metric_keys
+            if needs_rebuild:
+                self._metric_list_generation += 1
+                await metrics.clear()
+                items: list[ListItem] = []
+                for key in self.metric_keys:
+                    item_id = _metric_item_id(key, self._metric_list_generation)
+                    items.append(ListItem(Label(key), id=item_id))
+                if items:
+                    await metrics.extend(items)
+            self._metric_by_item_id = {}
+            for key in self.metric_keys:
+                self._metric_by_item_id[_metric_item_id(key, self._metric_list_generation)] = key
+            if self.metric_keys:
+                if self.selected_metric not in self.metric_keys:
+                    self.selected_metric = self.metric_keys[0]
+                self._set_selected_metric(self.selected_metric)
+            else:
+                self.selected_metric = None
 
     def _set_selected_metric(self, metric: str | None) -> None:
         if metric is None or metric not in self.metric_keys:
@@ -334,9 +346,9 @@ def _metric_keys(history: list[dict[str, Any]]) -> list[str]:
     return sorted(keys)
 
 
-def _metric_item_id(metric: str) -> str:
+def _metric_item_id(metric: str, generation: int) -> str:
     safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in metric)
-    return f"metric-{safe}"
+    return f"metric-{generation}-{safe}"
 
 
 def _plot_dimensions(plot: Static, container: Horizontal, sidebars: list[ListView]) -> tuple[int, int]:
@@ -397,9 +409,9 @@ def _run_list_signature(exps: list[dict[str, Any]]) -> tuple[tuple[str, str], ..
     return tuple((str(exp.get("experiment_id", "")), str(_coerce_experiment_status(exp.get("status")))) for exp in exps)
 
 
-def _run_item_id(exp: dict[str, Any], index: int) -> str:
+def _run_item_id(exp: dict[str, Any], index: int, generation: int) -> str:
     safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in str(exp.get("experiment_id", "")))
-    return f"run-{index}-{safe or 'unknown'}"
+    return f"run-{generation}-{index}-{safe or 'unknown'}"
 
 
 def _run_label(exp: dict[str, Any]) -> str:

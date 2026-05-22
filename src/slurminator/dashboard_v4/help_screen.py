@@ -55,9 +55,20 @@ Edit next-submission settings
 Screens
 Esc: return
 r: refresh details/logs
+s: switch log source
+c: copy selected/loaded log text
+m: toggle log terminal-selection mode
 l: plot log scale
 b: plot best overlay
-?: help"""
+?: help
+
+Log copy mode
+Space: mark start at top visible log line
+Scroll with mouse wheel or arrows
+Space again: mark end at top visible log line
+y or c: copy selected line range
+Esc: cancel active selection
+c without selection: copy loaded tail"""
 
 
 __all__ = ["HelpScreen"]

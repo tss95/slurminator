@@ -30,6 +30,7 @@ PluginFactory = Callable[[argparse.Namespace], OrchestratorPlugin]
 SweepModeRunner = Callable[[argparse.Namespace, Any | None], None]
 LaunchGuard = Callable[[], str | None]
 PLUGIN_ENV_VAR = "SLURMINATOR_PLUGIN"
+DEFAULT_DASHBOARD_UI = "v4"
 
 
 def build_base_parser() -> argparse.ArgumentParser:
@@ -95,8 +96,8 @@ def build_base_parser() -> argparse.ArgumentParser:
         "--dashboard-ui",
         dest="dashboard_ui",
         choices=["v2", "v3", "v4"],
-        default="v3",
-        help="Select dashboard UI version.",
+        default=None,
+        help="Select dashboard UI version. Default: orchestrator config value, otherwise v4.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Generate/validate and exit without launching jobs.")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
@@ -230,6 +231,7 @@ def run_orchestrator_cli(
             args, orchestrator_settings=loaded_config.orchestrator if loaded_config is not None else None
         )
     partition_overrides = parse_partition_overrides(args)
+    dashboard_ui = _resolve_dashboard_ui(args.dashboard_ui, loaded_config)
     orchestrator = orchestrator_cls(
         experiment_file=str(experiment_file),
         concurrency_limits=concurrency_limits,
@@ -241,13 +243,24 @@ def run_orchestrator_cli(
         timeout_retry_buffer=args.timeout_retry_buffer,
         timeout_retry_max_attempts=args.timeout_retry_max_attempts,
         debug=args.debug,
-        dashboard_ui=args.dashboard_ui,
+        dashboard_ui=dashboard_ui,
         connection_manager=early_connection_manager,
         plugin=plugin,
         partition_overrides=partition_overrides,
         dashboard_settings=loaded_config.orchestrator.dashboard if loaded_config is not None else None,
     )
     orchestrator.run()
+
+
+def _resolve_dashboard_ui(cli_value: str | None, loaded_config: Any | None) -> str:
+    """Resolve dashboard UI with CLI > orchestrator config > package default precedence."""
+    if cli_value:
+        return str(cli_value)
+    if loaded_config is not None:
+        config_value = getattr(getattr(loaded_config.orchestrator, "dashboard", None), "ui_version", None)
+        if config_value:
+            return str(config_value)
+    return DEFAULT_DASHBOARD_UI
 
 
 def discover_plugin(env: Mapping[str, str] | None = None) -> Any | None:

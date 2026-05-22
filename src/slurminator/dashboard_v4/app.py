@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import base64
 import logging
 import os
 import signal
@@ -18,6 +17,11 @@ from textual.app import App
 from textual.geometry import Size
 from textual.widget import Widget
 
+from slurminator.dashboard_v4.clipboard import (
+    copy_text_to_clipboard,
+    tmux_clipboard_passthrough_sequence as tmux_clipboard_passthrough_sequence,
+    write_tmux_clipboard_passthrough as write_tmux_clipboard_passthrough,
+)
 from slurminator.dashboard_v4.home_screen import HomeScreen
 from slurminator.dashboard_v4.widgets import SparklineThresholds
 
@@ -305,6 +309,12 @@ class TextualDashboardApp(App[None]):
         height: 1fr;
         padding: 0 1;
     }
+
+    #log-copy-help {
+        height: 1;
+        padding: 0 1;
+        color: $text-muted;
+    }
     """
 
     def __init__(
@@ -391,8 +401,7 @@ class TextualDashboardApp(App[None]):
         if not experiment_id:
             self.notify("No experiment ID to copy", severity="warning")
             return
-        self.copy_to_clipboard(experiment_id)
-        write_tmux_clipboard_passthrough(self._driver, experiment_id)
+        copy_text_to_clipboard(self, experiment_id)
         self.notify(f"Copied experiment ID: {experiment_id}", timeout=2.0)
 
     def dashboard_experiment_id(self) -> str | None:
@@ -550,21 +559,4 @@ def _is_console_stream_handler(handler: logging.Handler) -> bool:
     return stream in {sys.stdout, sys.stderr, sys.__stdout__, sys.__stderr__}
 
 
-def write_tmux_clipboard_passthrough(driver: Any, text: str) -> bool:
-    """Write an OSC 52 clipboard sequence wrapped for tmux passthrough."""
-    if not os.environ.get("TMUX") or driver is None:
-        return False
-    write = getattr(driver, "write", None)
-    if not callable(write):
-        return False
-    write(tmux_clipboard_passthrough_sequence(text))
-    return True
-
-
-def tmux_clipboard_passthrough_sequence(text: str) -> str:
-    """Return an OSC 52 clipboard sequence wrapped in tmux DCS passthrough."""
-    base64_text = base64.b64encode(text.encode("utf-8")).decode("utf-8")
-    return f"\x1bPtmux;\x1b\x1b]52;c;{base64_text}\a\x1b\\"
-
-
-__all__ = ["TextualDashboardApp"]
+__all__ = ["TextualDashboardApp", "tmux_clipboard_passthrough_sequence", "write_tmux_clipboard_passthrough"]
