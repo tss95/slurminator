@@ -990,26 +990,44 @@ class TerminalDashboard:
         info = exp.get("display_metric_info", {})
         return info if isinstance(info, dict) else {}
 
+    @staticmethod
+    def _metric_column_specs(exp: dict) -> list[dict]:
+        columns = exp.get("display_metric_columns", [])
+        if not isinstance(columns, list):
+            return []
+        return [column for column in columns if isinstance(column, dict) and column.get("key")]
+
     def _metric_info_for(self, exp: dict, metric_key: str | None) -> dict | None:
         if not metric_key:
             return None
         info = self._metric_info_map(exp).get(metric_key)
-        return info if isinstance(info, dict) else None
+        if isinstance(info, dict):
+            return info
+        for column in self._metric_column_specs(exp):
+            if column.get("key") == metric_key:
+                return column
+        return None
 
     def _resolve_v3_metric_columns(self, exps: List[dict]) -> list[tuple[str, dict]]:
         metric_columns: list[tuple[str, dict]] = []
         seen: set[str] = set()
 
         for exp in exps:
-            ordered_keys = [
-                exp.get("target_metric_name"),
-                exp.get("secondary_metric_name"),
-                *self._metric_info_map(exp).keys(),
-            ]
-            for metric_key in ordered_keys:
+            explicit_columns = self._metric_column_specs(exp)
+            if explicit_columns:
+                ordered_columns = [(str(column["key"]), column) for column in explicit_columns]
+            else:
+                ordered_columns = [
+                    (metric_key, self._metric_info_for(exp, metric_key) or {})
+                    for metric_key in (
+                        exp.get("target_metric_name"),
+                        exp.get("secondary_metric_name"),
+                        *self._metric_info_map(exp).keys(),
+                    )
+                ]
+            for metric_key, metric_info in ordered_columns:
                 if not metric_key or metric_key in seen:
                     continue
-                metric_info = self._metric_info_for(exp, metric_key) or {}
                 metric_columns.append((metric_key, metric_info))
                 seen.add(metric_key)
 
@@ -1033,6 +1051,10 @@ class TerminalDashboard:
         return metric_columns
 
     def _resolve_primary_metric_key(self, exp: dict, metric_columns: list[tuple[str, dict]]) -> str | None:
+        explicit_columns = self._metric_column_specs(exp)
+        if explicit_columns:
+            return str(explicit_columns[0]["key"])
+
         metric_key = exp.get("target_metric_name")
         if metric_key:
             return metric_key

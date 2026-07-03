@@ -16,6 +16,7 @@ from slurminator.callbacks.status_normalization import (
     MetricDisplayCandidate,
     normalize_status_payload,
 )
+from slurminator.metrics import MetricLayout, MetricLayoutFactory, coerce_metric_layout_factory
 from slurminator.schemas.status_schema import HistoryEntry, OrchestratorStatus, StatusState, can_transition
 
 logger = logging.getLogger("slurminator")
@@ -40,6 +41,7 @@ class OrchestratorStatusCallback:
         primary_metric: str | None = None,
         secondary_metric: str | None = None,
         metric_info: Mapping[str, MetricDisplayCandidate | Mapping[str, object]] | None = None,
+        metric_layout_factory: MetricLayout | MetricLayoutFactory | None = None,
         time_fn: Callable[[], float] | None = None,
         pre_replace_hook: Callable[[Path, Path], None] | None = None,
         status_root_name: str = ".orchestrator_status",
@@ -53,6 +55,7 @@ class OrchestratorStatusCallback:
         self._explicit_primary_metric = _clean_string(primary_metric)
         self._explicit_secondary_metric = _clean_string(secondary_metric)
         self._explicit_metric_info = dict(metric_info or {})
+        self._metric_layout_factory = coerce_metric_layout_factory(metric_layout_factory)
         self._time_fn = time_fn or time.time
         self._pre_replace_hook = pre_replace_hook
         self._status_root_name = _clean_string(status_root_name) or ".orchestrator_status"
@@ -71,6 +74,8 @@ class OrchestratorStatusCallback:
         self._primary_metric: str | None = None
         self._secondary_metric: str | None = None
         self._metric_info: dict[str, MetricDisplayCandidate] = {}
+        self._metric_columns = ()
+        self._metric_layout = MetricLayout()
 
         self._last_step: int | None = None
         self._last_step_at: float | None = None
@@ -151,6 +156,7 @@ class OrchestratorStatusCallback:
 
         if trainer is not None:
             self._links.update(self._resolve_links(trainer))
+        self._refresh_metric_layout(trainer)
         progress = self._build_progress_snapshot(trainer, epoch=epoch, epoch_completed=epoch_completed)
         status = normalize_status_payload(
             experiment_id=self._require_experiment_id(),
@@ -162,6 +168,7 @@ class OrchestratorStatusCallback:
             metrics=self._metrics,
             primary_metric=self._primary_metric,
             secondary_metric=self._secondary_metric,
+            metric_columns=self._metric_columns,
             metric_info=self._metric_info,
             links=self._links,
         )
@@ -251,14 +258,34 @@ class OrchestratorStatusCallback:
         return {}
 
     def _resolve_display_candidates(self, trainer: object) -> None:
+        self._refresh_metric_layout(trainer)
+
+    def _refresh_metric_layout(self, trainer: object | None = None) -> None:
+        """Resolve the current metric layout from explicit args and the factory."""
         candidates: dict[str, MetricDisplayCandidate] = {}
         for key, info in self._explicit_metric_info.items():
             candidate = _metric_candidate_from_mapping(info) if isinstance(info, Mapping) else info
             candidates[key] = candidate
 
-        self._primary_metric = self._explicit_primary_metric
-        self._secondary_metric = self._explicit_secondary_metric
-        self._metric_info = candidates
+        legacy_layout = MetricLayout.from_legacy(
+            primary_metric=self._explicit_primary_metric,
+            secondary_metric=self._explicit_secondary_metric,
+            metric_info=candidates,
+        )
+        layout = legacy_layout
+        if self._metric_layout_factory is not None:
+            factory_layout = self._metric_layout_factory.build(cfg=self.cfg, trainer=trainer, metrics=self._metrics)
+            layout = factory_layout.merged(legacy_layout)
+
+        self._metric_layout = layout
+        self._metric_info = dict(layout.metric_info)
+        self._metric_columns = tuple(layout.table_columns)
+        self._primary_metric = self._explicit_primary_metric or (
+            self._metric_columns[0].key if self._metric_columns else None
+        )
+        self._secondary_metric = self._explicit_secondary_metric or (
+            self._metric_columns[1].key if len(self._metric_columns) > 1 else None
+        )
 
     def _build_progress_snapshot(
         self, trainer: object | None, *, epoch: int | None = None, epoch_completed: bool = False
@@ -382,7 +409,7 @@ class OrchestratorStatusCallback:
 
     def _history_metrics(self, status: OrchestratorStatus) -> dict[str, float]:
         """Return the metrics to append to the history file for this status."""
-        return dict(status.metrics)
+        return self._metric_layout.history_metrics(status.metrics)
 
     def _read_existing_state(self) -> StatusState | None:
         if self.status_file is None or not self.status_file.exists():

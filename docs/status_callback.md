@@ -16,7 +16,7 @@ $SAVE_PATH/.orchestrator_status[/sweep_<sweep_id>]/history_<job_id>.jsonl
 
 The dashboard ingests these files while jobs are running and projects the latest
 values onto the experiment-state YAML. The schema is defined by
-`slurminator.schemas.status_schema` and is currently at version 1.1.
+`slurminator.schemas.status_schema` and is currently at version 1.2.
 
 ## What Dashboard v4 Reads From The Callback
 
@@ -26,8 +26,8 @@ dashboard, this table is the first place to check.
 | v4 feature                                  | What it needs from the callback                                            |
 | ------------------------------------------- | -------------------------------------------------------------------------- |
 | Home-table progress, speed, ETA             | `progress` block in `status_<job_id>.json` (lifecycle hooks fire normally) |
-| Primary / secondary highlight columns       | `primary_metric` / `secondary_metric` *and* that key emitted into `metrics` |
-| Any named metric column                     | An entry in `metric_info` *and* the key emitted into `metrics`             |
+| Ordered dashboard metric columns            | `display.metric_columns` from a metric layout, or legacy primary/secondary |
+| Any named metric metadata                   | An entry in `metric_info` *and* the key emitted into `metrics`             |
 | Metric column color                         | `threshold` and `higher_better` on the column's `MetricDisplayCandidate`   |
 | Best-so-far value in cell (parenthetical)   | `best_key` on the candidate *and* that best key emitted into `metrics`     |
 | Trajectory sparkline in the home table      | Metric value present in `history_<job_id>.jsonl`                           |
@@ -44,11 +44,11 @@ That keeps the dashboard from showing dead columns during `initializing`.
 
 Decide these before you ship a callback to a long-running cluster:
 
-1. **Primary and secondary metrics.** Which one or two metrics belong in the
-   highlight columns of the home table.
-2. **Full display set.** Every other metric you want as a sortable, color-coded
-   column. Anything not in `metric_info` still ends up in the status file but
-   does not get a named column.
+1. **Table columns.** Which ordered metrics belong in the main table. This can
+   be two metrics or many; terminal width and UI settings decide how many are
+   practical to view at once.
+2. **Metric metadata.** Short labels, direction, thresholds, and best-key
+   overlays for metrics that might appear in tables or plots.
 3. **History scope.** Which metrics you want to trend in sparklines and the
    per-run plot. The default appends every finite numeric metric; for projects
    with dozens of metrics per epoch you almost always want a narrower set.
@@ -152,51 +152,35 @@ Use `cfg` as project context, not as a required Slurminator schema. Generic
 callbacks can pass `cfg=None` and provide identity values through constructor
 arguments or environment variables.
 
-## Display Metrics: Primary, Secondary, And The Full Set
+## Display Metrics: Layouts, Columns, And Metadata
 
-The main dashboard table discovers metric columns from, in order:
+Slurminator separates three metric surfaces:
 
-1. `primary_metric`,
-2. `secondary_metric`,
-3. every key in `metric_info`.
+- `metrics`: the latest flat numeric metric dump. This is preserved in the
+  status file and projected into experiment YAML.
+- `history`: the subset appended to `history_<job_id>.jsonl` for trajectories
+  and per-run plots.
+- `metric_columns`: the ordered main-table display columns.
 
-Columns with no value across the visible rows are dropped to keep the table
-compact. Compact summary widgets may still show only primary and secondary
-metrics; the full metric set is preserved in `metrics` and rendered in the
-main table when values exist.
+The legacy `primary_metric` and `secondary_metric` constructor arguments still
+work. Internally, new code should prefer a `MetricLayout`, which can specify
+any number of table columns and a separate history policy.
 
-Declare every metric you want as a named column in `metric_info`, even if it
-is the same as `primary_metric` or `secondary_metric`:
+For simple projects with fixed metric keys:
 
 ```python
+from slurminator.metrics import MetricColumnSpec, MetricLayout
+
 status_cb = OrchestratorStatusCallback(
     cfg=cfg,
-    primary_metric="val/accuracy",
-    secondary_metric="val/loss",
-    metric_info={
-        "val/accuracy": MetricDisplayCandidate(
-            shortform="acc",
-            higher_better=True,
-            format=".2%",
-            threshold=0.90,
+    metric_layout_factory=MetricLayout(
+        table_columns=(
+            MetricColumnSpec("val/accuracy", shortform="acc", higher_better=True, format=".2%"),
+            MetricColumnSpec("val/loss", shortform="loss", higher_better=False, format=".4f"),
+            MetricColumnSpec("val/f1", shortform="f1", higher_better=True, format=".3f"),
         ),
-        "val/loss": MetricDisplayCandidate(
-            shortform="loss",
-            higher_better=False,
-            format=".4f",
-        ),
-        "val/f1": MetricDisplayCandidate(
-            shortform="f1",
-            higher_better=True,
-            format=".3f",
-        ),
-        "val/auroc": MetricDisplayCandidate(
-            shortform="auc",
-            higher_better=True,
-            format=".3f",
-            threshold=0.95,
-        ),
-    },
+        history_metric_keys=frozenset({"train/loss", "val/accuracy", "val/loss", "val/f1"}),
+    ),
 )
 ```
 
@@ -216,9 +200,8 @@ status_cb.on_epoch_end(
 )
 ```
 
-Metrics that are emitted but not listed in `metric_info` are still preserved
-in the status file and experiment-state YAML. They are not promoted to named
-dashboard columns unless you declare display metadata for them.
+Metrics that are emitted but not selected for table columns or history are
+still preserved in the status file and experiment-state YAML.
 
 ### Stable Keys And Shortforms
 
@@ -264,9 +247,10 @@ per-run plot screen useful. Each line is a `HistoryEntry` JSON object with
 
 By default, the callback appends every finite numeric metric in
 `status.metrics` to the history file. For projects with dozens of metrics per
-epoch, that produces noisy plot menus and large history files. Override
-`_history_metrics()` to scope the history to the metrics you actually want to
-trend:
+epoch, that produces noisy plot menus and large history files. Prefer setting
+`MetricLayout.history_metric_keys`, `history_metric_prefixes`, or
+`history_selector`; override `_history_metrics()` only when you need custom
+behavior that cannot be expressed as a layout.
 
 ```python
 class ProjectStatusCallback(OrchestratorStatusCallback):
@@ -420,56 +404,42 @@ passes, or framework callbacks that report metrics after the main training
 loop. The write goes through the same throttle and history append path as
 other metric updates.
 
-## Project-Specific Metric Selection
+## Project-Specific Metric Factories
 
-Use constructor arguments when every run uses the same metric keys. Subclass
-the callback when metric selection depends on task type, dataset, model
-family, or a project config object.
+Use constructor arguments or a static `MetricLayout` when every run uses the
+same metric keys. Use a factory when metric selection depends on task type,
+dataset, model family, or a project config object.
 
-Override `_resolve_display_candidates()` to set the display metric policy:
+The recommended project-level contract is:
 
 ```python
-from slurminator.callbacks.status_callback import OrchestratorStatusCallback
-from slurminator.callbacks.status_normalization import MetricDisplayCandidate
+from slurminator.metrics import MetricColumnSpec, MetricLayout
 
 
-class ProjectStatusCallback(OrchestratorStatusCallback):
-    def _resolve_display_candidates(self, trainer) -> None:
-        super()._resolve_display_candidates(trainer)
-
-        cfg = getattr(trainer, "cfg", None) or getattr(trainer, "config", None) or self.cfg
+class ProjectMetricLayoutFactory:
+    def build(self, *, cfg=None, trainer=None, metrics=None):
         task_type = getattr(cfg, "task_type", "classification")
-
         if task_type == "classification":
-            self._primary_metric = "val/accuracy"
-            self._secondary_metric = "val/loss"
-            self._metric_info.update(
-                {
-                    "val/accuracy": MetricDisplayCandidate(
-                        shortform="acc", higher_better=True, format=".2%"
-                    ),
-                    "val/loss": MetricDisplayCandidate(
-                        shortform="loss", higher_better=False, format=".4f"
-                    ),
-                    "val/f1": MetricDisplayCandidate(
-                        shortform="f1", higher_better=True, format=".3f"
-                    ),
-                }
+            return MetricLayout(
+                table_columns=(
+                    MetricColumnSpec("val/accuracy", shortform="acc", higher_better=True, format=".2%"),
+                    MetricColumnSpec("val/loss", shortform="loss", higher_better=False, format=".4f"),
+                    MetricColumnSpec("val/f1", shortform="f1", higher_better=True, format=".3f"),
+                ),
+                history_metric_keys=frozenset({"train/loss", "val/accuracy", "val/loss", "val/f1"}),
             )
-        elif task_type == "forecasting":
-            self._primary_metric = "val/mae"
-            self._secondary_metric = "val/mse"
-            self._metric_info.update(
-                {
-                    "val/mae": MetricDisplayCandidate(
-                        shortform="mae", higher_better=False, format=".4f"
-                    ),
-                    "val/mse": MetricDisplayCandidate(
-                        shortform="mse", higher_better=False, format=".4f"
-                    ),
-                }
+        if task_type == "forecasting":
+            return MetricLayout(
+                table_columns=(
+                    MetricColumnSpec("val/mse", shortform="mse", higher_better=False, format=".4f"),
+                    MetricColumnSpec("val/mae", shortform="mae", higher_better=False, format=".4f"),
+                ),
+                history_metric_keys=frozenset({"train/loss", "val/mse", "val/mae"}),
             )
 ```
+
+Then pass the factory to `OrchestratorStatusCallback(metric_layout_factory=...)`
+or expose it from a project plugin with `metric_layout_factory()`.
 
 The same strict materialization rule applies: declaring a metric candidate
 does not write it into `display.metric_info` until the numeric metric appears
@@ -499,19 +469,18 @@ argument). The same throttle gates history appends triggered from batch hooks,
 so a tight inner loop does not produce a write per step. Epoch boundaries and
 explicit `update_metrics()` calls always flush.
 
-## Status Schema v1.1
+## Status Schema v1.2
 
-Schema v1.1 adds:
+Schema v1.2 adds:
 
-- `attempt` on `OrchestratorStatus` and `HistoryEntry`. Incremented on
-  relaunch against an existing history file.
-- `progress.unit` ("epoch" or "step") and the same `unit` field on each
-  `HistoryEntry`, so plots can choose the right x-axis without inspecting
-  config.
+- `display.metric_columns`: ordered dashboard columns, separate from the
+  broader `display.metric_info` metadata map.
+- Legacy `display.primary_metric` and `display.secondary_metric` are still
+  written from the first two materialized columns for older integrations.
 
-Compatibility is forward-asymmetric: a v1.1 reader accepts v1.0 status files
-(missing fields default cleanly), but a v1.0 reader is not expected to accept
-v1.1 files. Anyone consuming the JSONL externally should pin to v1.1 readers.
+Schema v1.1 added `attempt` and progress/history `unit`. Readers for v1.2
+accept v1.0/v1.1 status files, but older readers are not expected to accept
+v1.2 files. Anyone consuming status JSON externally should pin to v1.2 readers.
 
 ## Troubleshooting
 

@@ -4,6 +4,7 @@ import pytest
 
 from slurminator.callbacks.status_callback import OrchestratorStatusCallback
 from slurminator.callbacks.status_normalization import MetricDisplayCandidate
+from slurminator.metrics import MetricColumnSpec, MetricLayout, StaticMetricLayoutFactory
 from slurminator.schemas.status_schema import HistoryEntry, OrchestratorStatus
 
 pytestmark = pytest.mark.unit
@@ -72,7 +73,7 @@ def test_status_callback_schema_roundtrip_and_sweep_path(tmp_path):
     callback.on_train_start(trainer)
 
     status = read_status(callback)
-    assert status.schema_version == "1.1"
+    assert status.schema_version == "1.2"
     assert status.attempt == 1
     assert status.status == "initializing"
     assert status.experiment_id == "exp-1"
@@ -262,3 +263,40 @@ def test_status_callback_history_metric_hook_can_filter_metrics(tmp_path):
     history = read_history(callback)
     assert history[0].unit == "epoch"
     assert history[0].metrics == {"val/acc": 0.5}
+
+
+def test_status_callback_metric_layout_separates_table_history_and_dump(tmp_path):
+    clock = FakeClock()
+    cfg = make_cfg()
+    trainer = DummyTrainer(cfg)
+    layout = MetricLayout(
+        metric_info={
+            "train/loss": MetricDisplayCandidate(shortform="loss", higher_better=False),
+            "val/acc": MetricDisplayCandidate(shortform="acc", higher_better=True),
+            "val/loss": MetricDisplayCandidate(shortform="vloss", higher_better=False),
+        },
+        table_columns=(
+            MetricColumnSpec("val/acc", shortform="acc", higher_better=True),
+            MetricColumnSpec("val/loss", shortform="vloss", higher_better=False),
+        ),
+        history_metric_keys=frozenset({"train/loss", "val/acc"}),
+    )
+    callback = OrchestratorStatusCallback(
+        cfg=cfg,
+        save_path=tmp_path,
+        job_id="12345",
+        min_write_interval_seconds=0.0,
+        time_fn=clock,
+        metric_layout_factory=StaticMetricLayoutFactory(layout),
+    )
+
+    callback.on_train_start(trainer)
+    callback.update_metrics({"train/loss": 0.4, "val/acc": 0.9, "val/loss": 0.2, "debug/raw": 7.0}, trainer=trainer)
+
+    status = read_status(callback)
+    assert status.metrics["debug/raw"] == 7.0
+    assert [column.key for column in status.display.metric_columns] == ["val/acc", "val/loss"]
+    assert status.display.primary_metric == "val/acc"
+    assert status.display.secondary_metric == "val/loss"
+    assert set(status.display.metric_info) == {"train/loss", "val/acc", "val/loss"}
+    assert read_history(callback)[-1].metrics == {"train/loss": 0.4, "val/acc": 0.9}

@@ -7,8 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-SCHEMA_VERSION = "1.1"
-StatusSchemaVersion = Literal["1.0", "1.1"]
+SCHEMA_VERSION = "1.2"
+StatusSchemaVersion = Literal["1.0", "1.1", "1.2"]
 StatusState = Literal["initializing", "running", "completed"]
 ProgressUnit = Literal["epoch", "step"]
 
@@ -98,6 +98,31 @@ class MetricInfo(BaseModel):
         return stripped or None
 
 
+class MetricColumn(BaseModel):
+    """Ordered dashboard column for one displayed metric."""
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    key: str = Field(min_length=1)
+    shortform: str | None = None
+    higher_better: bool | None = None
+    format: str | None = None
+    threshold: float | None = None
+    best_key: str | None = None
+
+    @field_validator("key", "shortform", "format", "best_key")
+    @classmethod
+    def _blank_strings_become_none_except_key(cls, value: str | None, info) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if info.field_name == "key":
+            if not stripped:
+                raise ValueError("metric column key must not be blank.")
+            return stripped
+        return stripped or None
+
+
 class Display(BaseModel):
     """Dashboard-facing labels and rendering metadata."""
 
@@ -106,6 +131,7 @@ class Display(BaseModel):
     run_name: str = Field(min_length=1)
     primary_metric: str | None = None
     secondary_metric: str | None = None
+    metric_columns: list[MetricColumn] = Field(default_factory=list)
     metric_info: dict[str, MetricInfo] = Field(default_factory=dict)
 
     @field_validator("run_name")
@@ -199,6 +225,10 @@ class OrchestratorStatus(BaseModel):
     @model_validator(mode="after")
     def _display_references_must_point_to_metrics(self) -> "OrchestratorStatus":
         metric_keys = set(self.metrics)
+        for column in self.display.metric_columns:
+            if column.key not in metric_keys:
+                raise ValueError(f"display.metric_columns key={column.key!r} is not present in metrics.")
+
         for label, metric_key in (
             ("display.primary_metric", self.display.primary_metric),
             ("display.secondary_metric", self.display.secondary_metric),
@@ -231,6 +261,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "Display",
     "HistoryEntry",
+    "MetricColumn",
     "MetricInfo",
     "OrchestratorStatus",
     "Progress",

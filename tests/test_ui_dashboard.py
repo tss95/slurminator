@@ -63,3 +63,33 @@ def test_dashboard_progress_ignores_project_specific_pseudo_epoch_fields() -> No
     exp = {"current_pseudo_epoch": 8, "max_pseudo_epochs": 10, "current_epoch": 2, "max_epochs": 10}
 
     assert TerminalDashboard._resolve_progress_fraction(exp) == pytest.approx(0.2)
+
+
+def test_dashboard_v3_uses_metric_columns_instead_of_full_metric_info() -> None:
+    dash = TerminalDashboard(n_recent=1, ui_version="v3")
+    exp = {
+        "experiment_id": "exp1",
+        "status": ExperimentStatus.RUNNING,
+        "dataset_name": "demo",
+        "hpc_assignment": HPCType.OLIVIA,
+        "last_change_ts": 100.0,
+        "current_epoch": 1,
+        "max_epochs": 2,
+        "all_metrics": {"val/acc": 0.91, "val/loss": 0.2, "train/loss": 0.5},
+        "display_metric_columns": [
+            {"key": "val/acc", "shortform": "acc", "higher_better": True},
+            {"key": "val/loss", "shortform": "vloss", "higher_better": False},
+        ],
+        "display_metric_info": {
+            "val/acc": {"shortform": "acc", "higher_better": True},
+            "val/loss": {"shortform": "vloss", "higher_better": False},
+            "train/loss": {"shortform": "loss", "higher_better": False},
+        },
+    }
+
+    table = dash._render([exp])["main"].renderable
+    headers = [column.header for column in table.columns]
+
+    assert "ACC" in headers
+    assert "VLOSS" in headers
+    assert "LOSS" not in headers
