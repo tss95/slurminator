@@ -7,6 +7,15 @@
 dashboard:
   ui_version: v3
   poll_interval_seconds: 2
+  table:
+    sort:
+      # Main summary table sorting. Defaults preserve status groups and sort by
+      # primary current metric using metric_info.higher_better.
+      metric: primary              # primary | secondary
+      value: current               # current | best
+      direction: auto              # auto | asc | desc
+      preserve_state_groups: true
+      preserve_dataset_groups: false
   timeout_risk:
     min_progress: 0.1
     min_runtime_minutes: 15

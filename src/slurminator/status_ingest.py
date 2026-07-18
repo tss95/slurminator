@@ -30,6 +30,7 @@ class StatusIngestContext:
     load_yaml: LoadYaml
     save_yaml: SaveYaml
     projection_options: Mapping[str, Any] | None = None
+    persist_immediately: bool = True
 
 
 def status_file_path(save_path: str, job_id: str, sweep_id: object | None = None) -> str:
@@ -77,12 +78,17 @@ def update_running_experiment_info(exp: dict[str, Any], context: StatusIngestCon
         return None
 
     data = status.model_dump(mode="json")
-    apply_target_status_to_experiment(exp, status, context.projection_options)
+    status_changed = not _status_payload_already_ingested(exp, status)
+    if status_changed:
+        apply_target_status_to_experiment(exp, status, context.projection_options)
+        if not context.persist_immediately:
+            exp["last_metrics_update"] = status.last_update
     if _is_active_history_status(exp.get("status")):
         _read_and_merge_history(exp, context)
     elif is_terminal_status(exp.get("status")):
         _bound_terminal_history(exp)
-    update_experiment_config_with_metrics(exp, data, context)
+    if status_changed and context.persist_immediately:
+        update_experiment_config_with_metrics(exp, data, context)
     return data
 
 
@@ -149,6 +155,17 @@ def _is_active_history_status(status: Any) -> bool:
     return status in {ExperimentStatus.RUNNING, ExperimentStatus.QUEUED}
 
 
+def _status_payload_already_ingested(exp: Mapping[str, Any], status: OrchestratorStatus) -> bool:
+    """Return whether ``exp`` already contains this version of the status payload."""
+    last_metrics_update = exp.get("last_metrics_update")
+    if isinstance(last_metrics_update, bool):
+        return False
+    try:
+        return float(last_metrics_update) == status.last_update
+    except (TypeError, ValueError):
+        return False
+
+
 def apply_target_status_to_experiment(
     exp: dict[str, Any], status: OrchestratorStatus, projection_options: Mapping[str, Any] | None = None
 ) -> None:
@@ -172,6 +189,7 @@ def update_experiment_config_with_metrics(
                 break
 
         context.save_yaml(current_data)
+        exp["last_metrics_update"] = data.get("last_update")
     except Exception as exc:
         if isinstance(exc, ValueError):
             raise

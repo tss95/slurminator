@@ -1,6 +1,7 @@
 import copy
 import importlib
 import logging
+import math
 import os
 import time
 from collections.abc import Callable, Mapping
@@ -105,6 +106,9 @@ class HPCOrchestrator:
         dashboard_cls: Optional[Type[Any]] = None,
         dashboard_settings: object | None = None,
         overview_printer: Optional[OverviewPrinter] = None,
+        submission_batch_size: int = 8,
+        submission_batch_seconds: float = 2.0,
+        submission_checkpoint_size: int = 32,
     ):
         self.experiment_file = Path(experiment_file).resolve()
         self.experiment_dir = self.experiment_file.parent
@@ -116,7 +120,18 @@ class HPCOrchestrator:
         self.submissions_paused = False
         self._dashboard_exit_requested = False
         self._dashboard_snapshot: list[dict[str, Any]] = []
+        self._dashboard_snapshot_version = 0
         self.state_store = ExperimentStateStore(self.experiment_file, self.concurrency_limits)
+        if submission_batch_size <= 0:
+            raise ValueError("submission_batch_size must be a positive integer")
+        self.submission_batch_size = int(submission_batch_size)
+        if not math.isfinite(submission_batch_seconds) or submission_batch_seconds <= 0:
+            raise ValueError("submission_batch_seconds must be a positive finite number")
+        self.submission_batch_seconds = float(submission_batch_seconds)
+        if submission_checkpoint_size <= 0:
+            raise ValueError("submission_checkpoint_size must be a positive integer")
+        self.submission_checkpoint_size = int(submission_checkpoint_size)
+        self._prepared_submission_repositories: set[HPCType] = set()
         self.poll_interval = poll_interval
         self.max_unqueue_seconds = max_unqueue_seconds
 
@@ -262,55 +277,7 @@ class HPCOrchestrator:
         # ------------------------------------------------------------------
         try:
             data = self._load_yaml()
-
-            orchestrator_logger = logging.getLogger("slurminator")
-            _orig_level = orchestrator_logger.level
-            orchestrator_logger.setLevel(logging.WARNING)
-
-            validated_exps = 0
-
-            for exp in data.get("experiments", []):  # type: ignore[arg-type]
-                dataset_val = exp.get("dataset_name")  # type: ignore[call-arg]
-                if not dataset_val:
-                    continue  # Skip entries without dataset – they will fail later anyway
-
-                # Ensure dataset is a plain string for the config loader
-                dataset_str: str = str(dataset_val)
-
-                override_str = exp.get("sweep_params")  # type: ignore[call-arg]
-                if not override_str:
-                    if self.plugin.validate_experiment(exp, {}):
-                        validated_exps += 1
-                    continue  # Nothing to validate
-
-                try:
-                    overrides = self.parse_overrides(override_str)
-                except Exception as e:
-                    logger.error(
-                        "Failed to parse sweep_params for experiment '%s': %s", exp.get("experiment_id", "<unknown>"), e
-                    )
-                    raise
-
-                try:
-                    if self.plugin.validate_experiment(exp, overrides):
-                        validated_exps += 1
-                except Exception as e:
-                    logger.error(
-                        "Config sanity-check failed for experiment '%s' (dataset=%s): %s",
-                        exp.get("experiment_id", "<unknown>"),
-                        dataset_str,
-                        e,
-                    )
-                    raise
-
-            # Restore log level
-            orchestrator_logger.setLevel(_orig_level)
-
-            logger.info(
-                "Experiment YAML sanity-check passed – %d experiments with overrides validated.", validated_exps
-            )
-
-            # (multi_experiment already computed in __init__)
+            self._preflight_validate_experiments(data)
         except Exception:
             logger.error("Pre-flight sanity-check failed. Aborting orchestrator startup.")
             raise
@@ -335,6 +302,11 @@ class HPCOrchestrator:
             # Fix potential orphans before we start the dashboard
             self._recover_orphans()
 
+            # Reconcile scheduler and callback state once before entering the
+            # normal dashboard/submission cycle. This is especially important
+            # when resuming an existing ledger with --yaml.
+            resume_data = self._catch_up_existing_state()
+
             # ------------------------------------------------------------------
             # 2) Enter UI loop
             # ------------------------------------------------------------------
@@ -345,21 +317,22 @@ class HPCOrchestrator:
                     print_overview = self.overview_printer
 
                 while True:
-                    data = self._load_yaml()
+                    caught_up_this_cycle = resume_data is not None
+                    data = resume_data if resume_data is not None else self._load_yaml()
+                    resume_data = None
                     exps = data["experiments"]
 
-                    self._process_command_queue(exps)
-                    self._update_statuses(exps)
-                    self._update_queue_estimates(exps)
-                    data["experiments"] = exps
-                    self._save_yaml(data)
+                    processed_commands = self._process_command_queue(exps)
+                    if processed_commands:
+                        data["experiments"] = exps
+                        self._save_yaml(data)
+                        self._publish_dashboard_snapshot(exps)
+                    if not caught_up_this_cycle:
+                        self._update_statuses(exps)
+                        self._update_queue_estimates(exps)
 
-                    concurrency_used = self._count_concurrency(exps)
-
+                    concurrency_used = self._fill_available_capacity(exps, data)
                     if not self.submissions_paused:
-                        for exp in exps:
-                            self._maybe_submit(exp, concurrency_used, data)
-
                         self._maybe_reassign_experiments(exps, concurrency_used, data)
 
                     data["experiments"] = exps
@@ -379,40 +352,49 @@ class HPCOrchestrator:
                 dashboard_kwargs = {"n_recent": 0, "ui_version": effective_dashboard_ui}
                 if effective_dashboard_ui == "v4":
                     dashboard_kwargs["sparkline_thresholds"] = getattr(self.dashboard_settings, "sparkline", None)
+                    dashboard_kwargs["table_sort"] = getattr(self.dashboard_settings, "table_sort", None)
                 dash = DashboardCls(**dashboard_kwargs)
+                initial_exps = self._publish_current_dashboard_snapshot()
 
                 with dash.mount(self) as live:
+                    live.update(dash.render(initial_exps))
                     while True:
-                        data = self._load_yaml()
+                        caught_up_this_cycle = resume_data is not None
+                        data = resume_data if resume_data is not None else self._load_yaml()
+                        resume_data = None
                         exps = data["experiments"]
 
-                        self._process_command_queue(exps)
+                        processed_commands = self._process_command_queue(exps)
+                        if processed_commands:
+                            data["experiments"] = exps
+                            self._save_yaml(data)
+                            self._render_dashboard_snapshot(dash, exps, live=live)
                         if self._dashboard_requested_exit(dash):
                             logger.info("Dashboard requested orchestrator exit.")
                             break
-                        self._update_statuses(exps)
-                        self._update_queue_estimates(exps)
-                        data["experiments"] = exps
-                        self._save_yaml(data)
+                        if not caught_up_this_cycle:
+                            self._update_statuses(exps)
+                            self._update_queue_estimates(exps)
+                            self._render_dashboard_snapshot(dash, exps, live=live)
                         if self._dashboard_requested_exit(dash):
                             logger.info("Dashboard requested orchestrator exit.")
                             break
 
-                        concurrency_used = self._count_concurrency(exps)
-
+                        concurrency_used = self._fill_available_capacity(
+                            exps,
+                            data,
+                            on_refresh=lambda current_exps: self._render_dashboard_snapshot(
+                                dash, current_exps, live=live
+                            ),
+                            should_stop=lambda: self._dashboard_requested_exit(dash),
+                        )
                         if not self.submissions_paused:
-                            for exp in exps:
-                                self._maybe_submit(exp, concurrency_used, data)
-
                             self._maybe_reassign_experiments(exps, concurrency_used, data)
 
                         data["experiments"] = exps
                         self._save_yaml(data)
 
-                        # Ensure all experiments have display metrics populated before rendering
-                        populate_display_metrics(exps)
-                        self._publish_dashboard_snapshot(exps)
-                        live.update(dash.render(exps))
+                        self._render_dashboard_snapshot(dash, exps, live=live)
 
                         if self._dashboard_requested_exit(dash):
                             logger.info("Dashboard requested orchestrator exit.")
@@ -421,9 +403,7 @@ class HPCOrchestrator:
                         if self._all_done(exps):
                             logger.info("All experiments terminal => exiting orchestrator.")
                             # Ensure display metrics are populated for final render
-                            populate_display_metrics(exps)
-                            self._publish_dashboard_snapshot(exps)
-                            live.update(dash.render(exps))
+                            self._render_dashboard_snapshot(dash, exps, live=live)
                             break
 
                         if self._sleep_until_next_poll(dash):
@@ -438,6 +418,62 @@ class HPCOrchestrator:
         finally:
             logger.info("Closing HPC connections.")
             self.connection_manager.close_all()
+
+    def _preflight_validate_experiments(self, data: Mapping[str, Any]) -> int:
+        """Validate a fresh ledger, or skip repeated validation for a clear resume."""
+        experiments = data.get("experiments", [])
+        if any(isinstance(exp, Mapping) and bool(exp.get("job_id")) for exp in experiments):
+            logger.info(
+                "Existing job IDs detected; skipping repeated experiment config preflight for this resume. "
+                "Pending rows are assumed unchanged since the first successful validation."
+            )
+            return 0
+
+        orchestrator_logger = logging.getLogger("slurminator")
+        original_level = orchestrator_logger.level
+        orchestrator_logger.setLevel(logging.WARNING)
+        validated_experiments = 0
+
+        try:
+            for exp in experiments:
+                dataset = exp.get("dataset_name")
+                if not dataset:
+                    continue
+
+                sweep_params = exp.get("sweep_params")
+                if not sweep_params:
+                    if self.plugin.validate_experiment(exp, {}):
+                        validated_experiments += 1
+                    continue
+
+                try:
+                    overrides = self.parse_overrides(sweep_params)
+                except Exception as exc:
+                    logger.error(
+                        "Failed to parse sweep_params for experiment '%s': %s",
+                        exp.get("experiment_id", "<unknown>"),
+                        exc,
+                    )
+                    raise
+
+                try:
+                    if self.plugin.validate_experiment(exp, overrides):
+                        validated_experiments += 1
+                except Exception as exc:
+                    logger.error(
+                        "Config sanity-check failed for experiment '%s' (dataset=%s): %s",
+                        exp.get("experiment_id", "<unknown>"),
+                        str(dataset),
+                        exc,
+                    )
+                    raise
+        finally:
+            orchestrator_logger.setLevel(original_level)
+
+        logger.info(
+            "Experiment YAML sanity-check passed – %d experiments with overrides validated.", validated_experiments
+        )
+        return validated_experiments
 
     def _resolve_dashboard_cls(self):
         """Resolve the concrete dashboard class for the requested UI version."""
@@ -468,6 +504,50 @@ class HPCOrchestrator:
     def _publish_dashboard_snapshot(self, exps: list[dict[str, Any]]) -> None:
         """Publish a copy of the latest ledger for threaded dashboard readers."""
         self._dashboard_snapshot = copy.deepcopy(exps)
+        self._dashboard_snapshot_version += 1
+
+    def _publish_current_dashboard_snapshot(self) -> list[dict[str, Any]]:
+        """Publish the current ledger before expensive poll-cycle work starts."""
+        data = self._load_yaml()
+        exps = data.get("experiments", [])
+        populate_display_metrics(exps)
+        self._publish_dashboard_snapshot(exps)
+        return exps
+
+    def _catch_up_existing_state(self) -> dict[str, Any] | None:
+        """Reconcile active rows once and return the persisted resume snapshot."""
+        data = self._load_yaml()
+        exps = data.get("experiments", [])
+        active_before = sum(
+            1
+            for exp in exps
+            if exp.get("job_id") and exp.get("status") in {ExperimentStatus.QUEUED, ExperimentStatus.RUNNING}
+        )
+        if active_before == 0:
+            return None
+
+        logger.info("Reconciling %d active experiment(s) before entering the submission loop.", active_before)
+        self._update_statuses(exps)
+        self._update_queue_estimates(exps)
+        data["experiments"] = exps
+        self._save_yaml(data)
+        self._publish_dashboard_snapshot(exps)
+
+        active_after = sum(
+            1
+            for exp in exps
+            if exp.get("job_id") and exp.get("status") in {ExperimentStatus.QUEUED, ExperimentStatus.RUNNING}
+        )
+        logger.info(
+            "Resume reconciliation complete: %d active experiment(s) remain; ledger persisted once.", active_after
+        )
+        return data
+
+    def _render_dashboard_snapshot(self, dashboard: Any, exps: list[dict[str, Any]], *, live: Any) -> None:
+        """Publish and render a dashboard snapshot after visible state changes."""
+        populate_display_metrics(exps)
+        self._publish_dashboard_snapshot(exps)
+        live.update(dashboard.render(exps))
 
     def _dashboard_requested_exit(self, dashboard: Any) -> bool:
         """Return True when a dashboard requested the orchestrator loop to stop."""
@@ -568,12 +648,7 @@ class HPCOrchestrator:
         Poll HPC states via squeue/sacct. Update statuses for queued/running exps.
         If a job is terminal, gather logs and apply terminal-status policies.
         """
-        update_scheduler_statuses(
-            exps,
-            connection_manager=self.connection_manager,
-            concurrency_limits=self.concurrency_limits,
-            gather_logs=self._gather_logs,
-        )
+        self._refresh_scheduler_statuses(exps)
 
         # --- NEW: live metric progress via status files -----------------
         for e in exps:
@@ -590,6 +665,15 @@ class HPCOrchestrator:
                     self._update_running_experiment_info(e)
                 except Exception:
                     pass
+
+    def _refresh_scheduler_statuses(self, exps: list[dict[str, Any]]) -> None:
+        """Refresh scheduler-owned states without scanning metric/history files."""
+        update_scheduler_statuses(
+            exps,
+            connection_manager=self.connection_manager,
+            concurrency_limits=self.concurrency_limits,
+            gather_logs=self._gather_logs,
+        )
 
     def _poll_hpc(self, hpc_type: HPCType, jobids: List[str]) -> Dict[str, str]:
         """
@@ -683,17 +767,124 @@ class HPCOrchestrator:
                 if h in usage:
                     usage[h] += 1
                 else:
-                    logger.warning(f"{e['experiment_id']} queued/running on disabled HPC {h}")
+                    logger.debug("%s queued/running on zero-limit HPC %s", e["experiment_id"], h)
         return usage
 
     # -------------------------------------------------------------------------
     # Submission
     # -------------------------------------------------------------------------
-    def _maybe_submit(self, exp: dict, concurrency_used: Dict[HPCType, int], data: dict):
+    def _fill_available_capacity(
+        self,
+        exps: list[dict[str, Any]],
+        data: dict[str, Any],
+        *,
+        on_refresh: Callable[[list[dict[str, Any]]], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> dict[HPCType, int]:
+        """Fill available slots while keeping scheduler state reasonably fresh.
+
+        Submission receipts make accepted job IDs durable immediately. This
+        method therefore checkpoints the large YAML ledger only after a group
+        of small submission bursts, while polling Slurm and processing operator
+        commands between bursts. Full status-file ingestion remains in the
+        outer maintenance loop.
+        """
+        total_submitted = 0
+        concurrency_used = self._count_concurrency(exps)
+
+        while total_submitted < self.submission_checkpoint_size:
+            if self.submissions_paused or (should_stop is not None and should_stop()):
+                break
+
+            remaining_before_checkpoint = self.submission_checkpoint_size - total_submitted
+            submitted_count = self._submit_pending_batch(
+                exps, concurrency_used, data, max_submissions=remaining_before_checkpoint
+            )
+            if submitted_count == 0:
+                break
+            total_submitted += submitted_count
+
+            if total_submitted >= self.submission_checkpoint_size:
+                break
+
+            processed_commands = self._process_command_queue(exps)
+            if processed_commands:
+                data["experiments"] = exps
+                self._save_yaml(data)
+
+            if self.submissions_paused or (should_stop is not None and should_stop()):
+                if on_refresh is not None:
+                    on_refresh(exps)
+                break
+
+            active_before_refresh = {
+                str(exp.get("experiment_id"))
+                for exp in exps
+                if exp.get("status") in {ExperimentStatus.QUEUED, ExperimentStatus.RUNNING}
+            }
+            self._refresh_scheduler_statuses(exps)
+            retry_became_ready = any(
+                str(exp.get("experiment_id")) in active_before_refresh
+                and exp.get("status") in {ExperimentStatus.PENDING, ExperimentStatus.PARTIAL}
+                for exp in exps
+            )
+            if retry_became_ready:
+                # Checkpoint the terminal attempt before a retry replaces its
+                # job ID. A subsequent receipt can then prove which prior job
+                # it is allowed to supersede during crash recovery.
+                data["experiments"] = exps
+                self._save_yaml(data)
+            concurrency_used = self._count_concurrency(exps)
+            if on_refresh is not None:
+                on_refresh(exps)
+
+        if total_submitted:
+            logger.info(
+                "Submission fill phase accepted %d job(s); checkpointing the experiment ledger.", total_submitted
+            )
+        return concurrency_used
+
+    def _submit_pending_batch(
+        self,
+        exps: list[dict[str, Any]],
+        concurrency_used: dict[HPCType, int],
+        data: dict[str, Any],
+        *,
+        max_submissions: int | None = None,
+    ) -> int:
+        """Submit at most one bounded batch and return its successful submission count.
+
+        The count bound applies to successful submissions. The elapsed-time
+        bound is checked after each synchronous submission attempt, allowing
+        that attempt to finish before returning control to the outer polling
+        loop.
+        """
+        submitted_count = 0
+        submission_limit = self.submission_batch_size
+        if max_submissions is not None:
+            submission_limit = min(submission_limit, max(int(max_submissions), 0))
+        if submission_limit == 0:
+            return 0
+
+        batch_started_at = time.monotonic()
+        for exp in exps:
+            if self.submissions_paused:
+                break
+            if self._maybe_submit(exp, concurrency_used, data):
+                submitted_count += 1
+            if (
+                submitted_count >= submission_limit
+                or time.monotonic() - batch_started_at >= self.submission_batch_seconds
+            ):
+                break
+
+        return submitted_count
+
+    def _maybe_submit(self, exp: dict, concurrency_used: Dict[HPCType, int], data: dict) -> bool:
         """
         If PENDING or PARTIAL => pick HPC if not assigned, check concurrency, do sbatch universal_job.sh ...
         """
-        maybe_submit(
+        return maybe_submit(
             exp,
             concurrency_used,
             data,
@@ -702,6 +893,7 @@ class HPCOrchestrator:
             submit_experiment=self._submit_experiment_universal,
             replace_exp_in_list=self._replace_exp_in_list,
             save_yaml=self._save_yaml,
+            record_submission=self.state_store.record_submission,
         )
 
     def _submit_experiment_universal(self, exp: dict, hpc_type: HPCType) -> Optional[str]:
@@ -716,6 +908,7 @@ class HPCOrchestrator:
             time_hours_override=self.time_hours_override,
             memory_gb_override=self.memory_gb_override,
             partition_overrides=self.partition_overrides,
+            prepared_repositories=self._prepared_submission_repositories,
         )
         return submit_experiment_universal(exp, hpc_type, context)
 
@@ -742,6 +935,7 @@ class HPCOrchestrator:
             load_yaml=self._load_yaml,
             save_yaml=self._save_yaml,
             projection_options=self.projection_options,
+            persist_immediately=False,
         )
         return update_running_experiment_info(exp, context)
 

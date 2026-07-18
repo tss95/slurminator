@@ -44,6 +44,7 @@ Global menu
 Pause/resume submissions
 Set concurrency limits
 Set Slurm overrides for pending runs
+Set table sort
 Cancel active jobs
 
 Per-run menu

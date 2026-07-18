@@ -17,9 +17,8 @@ from textual.widgets import DataTable, Footer, Header, Static
 from slurminator.config import HPCType, HPC_CONFIGS
 from slurminator.dashboard_v4.keystrokes import HOME_BINDINGS
 from slurminator.dashboard_v4.per_run_menu import PerRunMenuScreen
-from slurminator.dashboard_v4.widgets import ExperimentsTable
+from slurminator.dashboard_v4.widgets import ExperimentsTable, table_render_signature
 from slurminator.experiments import ExperimentStatus
-from slurminator.experiments.yaml_utils import load_yaml
 from slurminator.quota import QuotaProvider, QuotaSnapshot, get_quota_provider
 
 logger = logging.getLogger("slurminator")
@@ -54,6 +53,8 @@ class HomeScreen(Screen[None]):
         self._last_summary_text = Text("")
         self._last_progress_text = Text("")
         self._last_footer_text = Text("")
+        self._last_refresh_key: tuple[object, ...] | None = None
+        self._last_table_signature: tuple[object, ...] | None = None
 
     def compose(self) -> ComposeResult:
         """Compose the dashboard home screen."""
@@ -73,24 +74,46 @@ class HomeScreen(Screen[None]):
         self.refresh_from_orchestrator()
         self.query_one(ExperimentsTable).focus()
 
+    def on_screen_resume(self) -> None:
+        """Refresh when returning from modal screens that may change table settings."""
+        self.refresh_from_orchestrator()
+
     def on_data_table_row_selected(self, _event: DataTable.RowSelected) -> None:
         """Open the placeholder modal when Enter selects the current table row."""
         self.action_drill_in()
 
-    def refresh_from_orchestrator(self) -> None:
+    def refresh_from_orchestrator(self, *, force: bool = False) -> None:
         """Refresh summary, table, and footer from the app snapshot."""
+        refresh_key = self._refresh_key()
+        if not force and refresh_key == self._last_refresh_key:
+            return
+        self._last_refresh_key = refresh_key
         experiments = self.app.get_dashboard_snapshot()
         self._last_summary_text = self._summary_text(experiments)
         self._last_progress_text = self._progress_text(experiments)
         self._last_footer_text = self._footer_text(experiments)
         self.query_one("#summary", Static).update(self._last_summary_text)
         self.query_one("#progress-bars", Static).update(self._last_progress_text)
-        self.query_one(ExperimentsTable).update_experiments(
-            experiments,
-            show_sparkline=bool(getattr(self.app, "sparkline_enabled", False)),
-            sparkline_thresholds=getattr(self.app, "sparkline_thresholds", None),
+        show_sparkline = bool(getattr(self.app, "sparkline_enabled", False))
+        sparkline_thresholds = getattr(self.app, "sparkline_thresholds", None)
+        table_sort = getattr(self.app, "table_sort", None)
+        table_signature = table_render_signature(
+            experiments, show_sparkline=show_sparkline, sparkline_thresholds=sparkline_thresholds, table_sort=table_sort
         )
+        if force or table_signature != self._last_table_signature:
+            self._last_table_signature = table_signature
+            self.query_one(ExperimentsTable).update_experiments(
+                experiments,
+                show_sparkline=show_sparkline,
+                sparkline_thresholds=sparkline_thresholds,
+                table_sort=table_sort,
+            )
         self.query_one("#quota", Static).update(self._last_footer_text)
+
+    def _refresh_key(self) -> tuple[object, ...]:
+        version_fn = getattr(self.app, "dashboard_snapshot_version", None)
+        version = version_fn() if callable(version_fn) else 0
+        return (version,)
 
     def action_cursor_up(self) -> None:
         """Move the table cursor up."""
@@ -110,7 +133,7 @@ class HomeScreen(Screen[None]):
     def action_toggle_sparkline(self) -> None:
         """Toggle the trajectory column."""
         self.app.sparkline_enabled = not bool(getattr(self.app, "sparkline_enabled", False))
-        self.refresh_from_orchestrator()
+        self.refresh_from_orchestrator(force=True)
 
     def action_copy_experiment_id(self) -> None:
         """Copy the dashboard experiment-list ID without leaving the home screen."""
@@ -376,22 +399,6 @@ class HomeScreen(Screen[None]):
             project = getattr(orchestrator, "project", None) or getattr(orchestrator, "tracker_project", None)
             if project:
                 projects.append(str(project))
-            exp_file = getattr(orchestrator, "experiment_file", None)
-            if exp_file:
-                try:
-                    data = load_yaml(str(exp_file))
-                    for exp in data.get("experiments", []):
-                        meta = exp.get("metadata")
-                        if isinstance(meta, dict):
-                            project = meta.get("project") or meta.get("tracker_project")
-                            if project:
-                                projects.append(str(project))
-                                continue
-                        project = exp.get("project") or exp.get("tracker_project")
-                        if project:
-                            projects.append(str(project))
-                except Exception:
-                    pass
 
         unique = sorted({project for project in projects if project})
         if not unique:

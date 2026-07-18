@@ -330,6 +330,29 @@ def test_run_command_reconnect(monkeypatch):
     assert client.exec_commands == ["echo", "echo"]
 
 
+def test_run_command_does_not_retry_ambiguous_remote_failure_when_disabled(monkeypatch):
+    client = DummySSHClient()
+    client.exec_responses = [Exception("ambiguous transport failure"), "would duplicate submission"]
+
+    cfg = HPCConnectionConfig(hostname="h", username="u")
+    mgr = HPCConnectionManager({HPCType.FOX: cfg})
+    mgr._clients[HPCType.FOX] = client
+    mgr._connected[HPCType.FOX] = True
+
+    monkeypatch.setattr(mgr, "is_local_hpc", lambda *_: False)
+    monkeypatch.setattr(
+        mgr, "connect", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not reconnect and retry"))
+    )
+    monkeypatch.setattr(
+        mgr, "close", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not reconnect and retry"))
+    )
+
+    with pytest.raises(Exception, match="ambiguous transport failure"):
+        mgr.run_command(HPCType.FOX, "sbatch --parsable job.sh", prefer_remote=True, retry_on_failure=False)
+
+    assert client.exec_commands == ["sbatch --parsable job.sh"]
+
+
 def test_interactive_auth_retries_with_pam_after_default_failure(monkeypatch):
     from slurminator.connection_manager import HPCConnectionManager, HPCConnectionConfig
 

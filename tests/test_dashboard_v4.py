@@ -18,7 +18,7 @@ from textual.widgets import Button, Input, Label, ListView, RichLog, Static
 
 import slurminator.hpc_orchestrator as hpc_orchestrator_module
 from slurminator.command_queue import Command
-from slurminator.config import HPCType
+from slurminator.config import DashboardTableSortSettings, HPCType
 from slurminator.dashboard_v4.app import (
     TextualDashboardApp,
     suppress_thread_signal_registration,
@@ -31,6 +31,7 @@ from slurminator.dashboard_v4.forms.concurrency_form import ConcurrencyFormScree
 from slurminator.dashboard_v4.forms.global_settings_form import GlobalSettingsFormScreen
 from slurminator.dashboard_v4.forms.relaunch_form import RelaunchFormScreen
 from slurminator.dashboard_v4.forms.settings_form import SettingsFormScreen
+from slurminator.dashboard_v4.forms.table_sort_form import TableSortFormScreen
 from slurminator.dashboard_v4.global_menu import GlobalMenuScreen
 from slurminator.dashboard_v4.help_screen import HelpScreen
 from slurminator.dashboard_v4.home_screen import HomeScreen
@@ -275,7 +276,9 @@ def test_textual_app_title_is_slurminator() -> None:
 def test_textual_home_renders_summary_progress_and_footer(tmp_path: Path) -> None:
     async def run() -> None:
         orch = _orchestrator(tmp_path)
-        orch._publish_dashboard_snapshot(_experiments())
+        experiments = _experiments()
+        experiments[0]["metadata"] = {"project": "project-a"}
+        orch._publish_dashboard_snapshot(experiments)
         app = TextualDashboardApp(refresh_interval=0.05)
         app.orchestrator = orch
 
@@ -301,6 +304,7 @@ def test_textual_home_renders_summary_progress_and_footer(tmp_path: Path) -> Non
             assert "Submissions: active" in footer
             assert "Limits: OLIVIA=1" in footer
             assert "Host: OLIVIA" in footer
+            assert "Project: project-a" in footer
             assert "Experiment: experiments" in footer
             assert "Slurm: h=2h ram=auto gpu=1" in footer
             assert "GPU quota: OLIVIA unavailable" in footer
@@ -314,6 +318,33 @@ def test_textual_home_renders_summary_progress_and_footer(tmp_path: Path) -> Non
             assert _has_styled_span(footer_text, "experiments", "dim")
             assert _has_styled_span(footer_text, "Slurm:", "cyan")
             assert _has_styled_span(footer_text, "GPU quota:", "yellow")
+
+    asyncio.run(run())
+
+
+def test_textual_home_renders_prepublished_initial_snapshot(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        data = {
+            "experiments": [
+                {
+                    "experiment_id": "exp-ready",
+                    "dataset_name": "dataset-a",
+                    "status": ExperimentStatus.PENDING,
+                    "hpc_assignment": HPCType.OLIVIA,
+                }
+            ]
+        }
+        orch._save_yaml(data)
+        orch._publish_current_dashboard_snapshot()
+        app = TextualDashboardApp(refresh_interval=10.0)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.pause(0.2)
+            table = app.screen.query_one(ExperimentsTable)
+            assert table.row_count == 1
+            assert table.get_row_at(0)[0] == "exp-ready"
 
     asyncio.run(run())
 
@@ -354,6 +385,117 @@ def test_textual_home_table_uses_status_colors_metric_colors_and_v3_order(tmp_pa
             assert str(list(table.columns.values())[6].label) == "vloss_traj"
 
     asyncio.run(run())
+
+
+def test_textual_home_table_sorts_by_secondary_current_metric(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        exps = []
+        for experiment_id, value in (("exp-low", 0.2), ("exp-high", 0.9), ("exp-mid", 0.5)):
+            exp = dict(_experiments()[0])
+            exp.update(
+                {
+                    "experiment_id": experiment_id,
+                    "status": ExperimentStatus.RUNNING,
+                    "secondary_metric_name": "acc",
+                    "secondary_metric_value": value,
+                    "display_metric_info": {"loss": {"higher_better": False}, "acc": {"higher_better": True}},
+                    "last_change_ts": 1.0,
+                }
+            )
+            exps.append(exp)
+        orch._publish_dashboard_snapshot(exps)
+        app = TextualDashboardApp(
+            refresh_interval=0.05,
+            table_sort=DashboardTableSortSettings(metric="secondary", value="current", direction="desc"),
+        )
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.pause(0.2)
+            table = app.screen.query_one(ExperimentsTable)
+            assert [table.get_row_at(row)[0] for row in range(table.row_count)] == ["exp-high", "exp-mid", "exp-low"]
+
+    asyncio.run(run())
+
+
+def test_textual_home_table_preserves_dataset_groups_when_sorting_best_metric(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+
+        def exp_row(experiment_id: str, dataset: str, current: float, best: float) -> dict:
+            exp = dict(_experiments()[0])
+            exp.update(
+                {
+                    "experiment_id": experiment_id,
+                    "dataset_name": dataset,
+                    "status": ExperimentStatus.RUNNING,
+                    "target_metric_name": "acc",
+                    "target_metric_value": current,
+                    "all_metrics": {"acc": current, "best_acc": best},
+                    "display_metric_info": {"acc": {"higher_better": True, "best_key": "best_acc"}},
+                    "last_change_ts": 1.0,
+                }
+            )
+            return exp
+
+        orch._publish_dashboard_snapshot(
+            [
+                exp_row("b-high", "dataset-b", current=0.4, best=0.99),
+                exp_row("a-low", "dataset-a", current=0.2, best=0.50),
+                exp_row("a-high", "dataset-a", current=0.3, best=0.80),
+            ]
+        )
+        app = TextualDashboardApp(
+            refresh_interval=0.05,
+            table_sort=DashboardTableSortSettings(
+                metric="primary", value="best", direction="desc", preserve_dataset_groups=True
+            ),
+        )
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.pause(0.2)
+            table = app.screen.query_one(ExperimentsTable)
+            assert [table.get_row_at(row)[0] for row in range(table.row_count)] == ["a-high", "a-low", "b-high"]
+
+    asyncio.run(run())
+
+
+def test_textual_home_table_signature_ignores_timestamp_only_changes() -> None:
+    exp = dict(_experiments()[0])
+    exp["history"] = [_history_line(epoch=1, loss=1.0, acc=0.5), _history_line(epoch=2, loss=0.8, acc=0.6)]
+    changed = dict(exp)
+    changed.update(
+        {"last_update": 123.0, "last_change_ts": 456.0, "queued_timestamp": 789.0, "running_timestamp": 999.0}
+    )
+
+    assert experiments_table_module.table_render_signature([exp], show_sparkline=True) == (
+        experiments_table_module.table_render_signature([changed], show_sparkline=True)
+    )
+
+    changed["target_metric_value"] = 0.1
+    assert experiments_table_module.table_render_signature([exp], show_sparkline=True) != (
+        experiments_table_module.table_render_signature([changed], show_sparkline=True)
+    )
+
+
+def test_textual_home_table_signature_ignores_repeated_history_values() -> None:
+    exp = dict(_experiments()[0])
+    exp["target_metric_name"] = "acc"
+    exp["history"] = [_history_line(epoch=1, loss=1.0, acc=0.5), _history_line(epoch=2, loss=0.8, acc=0.6)]
+    repeated = dict(exp)
+    repeated["history"] = [*exp["history"], _history_line(epoch=3, loss=0.7, acc=0.6)]
+
+    assert experiments_table_module.table_render_signature([exp], show_sparkline=True) == (
+        experiments_table_module.table_render_signature([repeated], show_sparkline=True)
+    )
+
+    changed = dict(exp)
+    changed["history"] = [*exp["history"], _history_line(epoch=3, loss=0.7, acc=0.7)]
+    assert experiments_table_module.table_render_signature([exp], show_sparkline=True) != (
+        experiments_table_module.table_render_signature([changed], show_sparkline=True)
+    )
 
 
 def test_textual_home_table_shows_best_values_for_primary_and_secondary(tmp_path: Path) -> None:
@@ -448,6 +590,27 @@ def test_textual_cancelled_status_uses_double_l_spelling(tmp_path: Path) -> None
             detail_text = app.screen._last_detail_text
             assert "status: cancelled" in detail_text
             assert "status: canceled" not in detail_text
+
+    asyncio.run(run())
+
+
+def test_textual_cancel_requested_status_is_visible_without_terminal_transition(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        exp = dict(_experiments()[0])
+        exp["status"] = ExperimentStatus.RUNNING
+        exp["cancel_requested_at"] = time.time()
+        exp["cancel_requested_job_id"] = "12345"
+        orch._publish_dashboard_snapshot([exp])
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.pause(0.2)
+            status_cell = app.screen.query_one(ExperimentsTable).get_row_at(0)[3]
+            assert isinstance(status_cell, Text)
+            assert status_cell.plain == "CANCEL REQ"
+            assert status_cell.style == "bold yellow"
 
     asyncio.run(run())
 
@@ -657,7 +820,7 @@ def test_textual_global_menu_cancel_all_writes_command(tmp_path: Path) -> None:
             await pilot.pause(0.2)
             await pilot.press("g")
             actions = app.screen.query_one("#global-actions")
-            actions.index = 3
+            actions.index = 4
             await pilot.press("enter")
             await pilot.pause(0.1)
             commands = _pending_commands(tmp_path)
@@ -684,6 +847,7 @@ def test_textual_global_menu_concurrency_form_writes_limit_commands(tmp_path: Pa
                 "toggle-submissions",
                 "set-concurrency",
                 "set-global-settings",
+                "set-table-sort",
                 "cancel-all",
                 "help",
                 "close-global-menu",
@@ -761,6 +925,70 @@ def test_textual_global_settings_form_clear_writes_clear_command(tmp_path: Path)
                 "scope": "pending",
                 "settings": {"time_hours": None, "memory_gb": None, "gpu_count": None},
             }
+
+    asyncio.run(run())
+
+
+def test_textual_global_menu_table_sort_form_updates_runtime_sort(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        exps = []
+        for experiment_id, value in (("exp-low", 0.2), ("exp-high", 0.9), ("exp-mid", 0.5)):
+            exp = dict(_experiments()[0])
+            exp.update(
+                {
+                    "experiment_id": experiment_id,
+                    "status": ExperimentStatus.RUNNING,
+                    "secondary_metric_name": "acc",
+                    "secondary_metric_value": value,
+                    "display_metric_info": {"loss": {"higher_better": False}, "acc": {"higher_better": True}},
+                    "last_change_ts": 1.0,
+                }
+            )
+            exps.append(exp)
+        orch._publish_dashboard_snapshot(exps)
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.pause(0.2)
+            await pilot.press("g")
+            await pilot.pause(0.1)
+            global_actions = app.screen.query_one("#global-actions")
+            global_actions.index = 3
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            assert isinstance(app.screen, TableSortFormScreen)
+            options = app.screen.query_one("#table-sort-options", ListView)
+            assert [child.query_one(Label).content for child in options.children] == [
+                "Metric: primary",
+                "Value: current",
+                "Direction: auto",
+                "State groups: on",
+                "Dataset groups: off",
+                "Apply sort",
+                "Return",
+            ]
+
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+            assert options.children[0].query_one(Label).content == "Metric: secondary"
+            options.index = 2
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+            assert options.children[2].query_one(Label).content == "Direction: asc"
+            options.index = 5
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+
+            assert isinstance(app.table_sort, DashboardTableSortSettings)
+            assert app.table_sort.metric == "secondary"
+            assert app.table_sort.direction == "asc"
+            assert isinstance(app.screen, GlobalMenuScreen)
+            await pilot.press("escape")
+            await pilot.pause(0.2)
+            table = app.screen.query_one(ExperimentsTable)
+            assert [table.get_row_at(row)[0] for row in range(table.row_count)] == ["exp-low", "exp-mid", "exp-high"]
 
     asyncio.run(run())
 
@@ -848,12 +1076,13 @@ def test_textual_help_opens_from_question_mark_and_global_menu(tmp_path: Path) -
             await pilot.press("g")
             await pilot.pause(0.1)
             global_actions = app.screen.query_one("#global-actions")
-            global_actions.index = 4
+            global_actions.index = 5
             await pilot.press("enter")
             await pilot.pause(0.1)
             assert isinstance(app.screen, HelpScreen)
             assert "Set concurrency limits" in str(app.screen.query_one("#help-content").render())
             assert "Set Slurm overrides" in str(app.screen.query_one("#help-content").render())
+            assert "Set table sort" in str(app.screen.query_one("#help-content").render())
 
     asyncio.run(run())
 

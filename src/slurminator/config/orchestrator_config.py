@@ -28,6 +28,17 @@ class SparklineSettings:
 
 
 @dataclass
+class DashboardTableSortSettings:
+    """Dashboard v4 main table sort settings."""
+
+    metric: str = "primary"
+    value: str = "current"
+    direction: str = "auto"
+    preserve_state_groups: bool = True
+    preserve_dataset_groups: bool = False
+
+
+@dataclass
 class DashboardSettings:
     """Dashboard behavior settings."""
 
@@ -35,6 +46,7 @@ class DashboardSettings:
     poll_interval_seconds: int = 30
     timeout_risk: TimeoutRiskSettings = field(default_factory=TimeoutRiskSettings)
     sparkline: SparklineSettings = field(default_factory=SparklineSettings)
+    table_sort: DashboardTableSortSettings = field(default_factory=DashboardTableSortSettings)
 
 
 @dataclass
@@ -142,6 +154,27 @@ def _coerce_str_tuple(value: Any, default: tuple[str, ...]) -> tuple[str, ...]:
     return default
 
 
+def _coerce_choice(
+    value: Any,
+    default: str,
+    choices: set[str],
+    name: str,
+    *,
+    logger: Any | None,
+    source: Path | str | None,
+) -> str:
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in choices:
+        return text
+    if logger is not None:
+        logger.warning(
+            "Invalid orchestrator.%s=%r in %s; using default %s", name, value, source or "config", default
+        )
+    return default
+
+
 def _mapping_or_empty(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
@@ -155,6 +188,8 @@ def parse_orchestrator_settings(
     dashboard_raw = _mapping_or_empty(orchestrator_raw.get("dashboard"))
     timeout_raw = _mapping_or_empty(dashboard_raw.get("timeout_risk"))
     sparkline_raw = _mapping_or_empty(dashboard_raw.get("sparkline"))
+    table_raw = _mapping_or_empty(dashboard_raw.get("table"))
+    table_sort_raw = _mapping_or_empty(table_raw.get("sort"))
     retry_raw = _mapping_or_empty(orchestrator_raw.get("retry"))
     polling_raw = _mapping_or_empty(orchestrator_raw.get("polling"))
     command_raw = _mapping_or_empty(orchestrator_raw.get("command"))
@@ -240,6 +275,40 @@ def parse_orchestrator_settings(
         ),
     )
 
+    table_sort_defaults = DashboardTableSortSettings()
+    table_sort_settings = DashboardTableSortSettings(
+        metric=_coerce_choice(
+            table_sort_raw.get("metric"),
+            table_sort_defaults.metric,
+            {"primary", "secondary"},
+            "dashboard.table.sort.metric",
+            logger=logger,
+            source=source,
+        ),
+        value=_coerce_choice(
+            table_sort_raw.get("value"),
+            table_sort_defaults.value,
+            {"current", "best"},
+            "dashboard.table.sort.value",
+            logger=logger,
+            source=source,
+        ),
+        direction=_coerce_choice(
+            table_sort_raw.get("direction"),
+            table_sort_defaults.direction,
+            {"auto", "asc", "desc"},
+            "dashboard.table.sort.direction",
+            logger=logger,
+            source=source,
+        ),
+        preserve_state_groups=_coerce_bool(
+            table_sort_raw.get("preserve_state_groups"), table_sort_defaults.preserve_state_groups
+        ),
+        preserve_dataset_groups=_coerce_bool(
+            table_sort_raw.get("preserve_dataset_groups"), table_sort_defaults.preserve_dataset_groups
+        ),
+    )
+
     dashboard_defaults = DashboardSettings()
     dashboard_settings = DashboardSettings(
         ui_version=str(dashboard_raw.get("ui_version", dashboard_defaults.ui_version)),
@@ -255,6 +324,7 @@ def parse_orchestrator_settings(
         ),
         timeout_risk=timeout_settings,
         sparkline=sparkline_settings,
+        table_sort=table_sort_settings,
     )
 
     retry_defaults = RetrySettings()
@@ -334,6 +404,7 @@ def parse_orchestrator_settings(
 __all__ = [
     "CommandSettings",
     "DashboardSettings",
+    "DashboardTableSortSettings",
     "OrchestratorSettings",
     "PollSettings",
     "RetrySettings",

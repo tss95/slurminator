@@ -44,12 +44,13 @@ class ExperimentsTable(DataTable):
         *,
         show_sparkline: bool = False,
         sparkline_thresholds: SparklineThresholds | object | None = None,
+        table_sort: object | None = None,
     ) -> None:
         """Replace table rows with the latest experiment snapshot."""
         previous_key = None
         if self._row_experiments and 0 <= self.cursor_row < len(self._row_experiments):
             previous_key = _row_key(self._row_experiments[self.cursor_row], self.cursor_row)
-        rows = _sorted_experiments(experiments)
+        rows = _sorted_experiments(experiments, table_sort=table_sort)
         cursor_row = _resolve_cursor_row(rows, previous_key, self.cursor_row)
         self.clear(columns=True)
         self._build_columns(
@@ -69,7 +70,7 @@ class ExperimentsTable(DataTable):
                 _text(exp.get("experiment_id"), "-"),
                 _text(exp.get("dataset_name") or exp.get("dataset") or exp.get("config"), "-"),
                 _format_enum(exp.get("hpc_assignment")),
-                _format_status(exp.get("status")),
+                _format_status(exp),
                 _format_progress(exp),
                 _format_metric(exp, primary_name, primary_value),
             ]
@@ -105,6 +106,23 @@ class ExperimentsTable(DataTable):
         self.add_columns(*columns)
 
 
+def table_render_signature(
+    experiments: list[dict[str, Any]],
+    *,
+    show_sparkline: bool = False,
+    sparkline_thresholds: SparklineThresholds | object | None = None,
+    table_sort: object | None = None,
+) -> tuple[object, ...]:
+    """Return a display signature for deciding whether the table body changed."""
+    rows = _sorted_experiments(experiments, table_sort=table_sort)
+    return (
+        bool(show_sparkline),
+        _object_signature(sparkline_thresholds),
+        tuple(sorted(_normalize_table_sort(table_sort).items())),
+        tuple(_row_render_signature(exp, show_sparkline=show_sparkline) for exp in rows),
+    )
+
+
 def _text(value: object, default: str = "") -> str:
     if value is None:
         return default
@@ -122,10 +140,13 @@ def _format_enum(value: object) -> str:
     return _text(value, "-")
 
 
-def _format_status(value: object) -> str | Text:
+def _format_status(exp: dict[str, Any]) -> str | Text:
+    value = exp.get("status")
+    status = _coerce_status(value)
+    if exp.get("cancel_requested_at") is not None and status in {ExperimentStatus.QUEUED, ExperimentStatus.RUNNING}:
+        return Text("CANCEL REQ", style="bold yellow")
     text = _format_enum(value)
     label = text.upper() if text != "-" else text
-    status = value if isinstance(value, ExperimentStatus) else None
     if status == ExperimentStatus.CANCELLED:
         label = "CANCELLED"
     style = {
@@ -141,6 +162,24 @@ def _format_status(value: object) -> str | Text:
         ExperimentStatus.KILLED: "bold red",
     }.get(status)
     return Text(label, style=style) if style else label
+
+
+def _coerce_status(value: object) -> ExperimentStatus | None:
+    if isinstance(value, ExperimentStatus):
+        return value
+    text = str(value).strip()
+    if text.startswith("ExperimentStatus."):
+        text = text.split(".", 1)[1]
+    normalized = text.upper().rstrip("+*")
+    if normalized.startswith("CANCELED") or normalized.startswith("CANCELLED"):
+        return ExperimentStatus.CANCELLED
+    try:
+        return ExperimentStatus(text)
+    except ValueError:
+        try:
+            return ExperimentStatus[normalized]
+        except KeyError:
+            return None
 
 
 def _format_progress(exp: dict[str, Any]) -> str:
@@ -279,35 +318,193 @@ def _coerce_float(value: object) -> float | None:
         return None
 
 
-def _sorted_experiments(experiments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _sorted_experiments(experiments: list[dict[str, Any]], *, table_sort: object | None = None) -> list[dict[str, Any]]:
     rows = list(experiments)
+    sort_settings = _normalize_table_sort(table_sort)
 
-    def sort_key(exp: dict[str, Any]) -> tuple[int, int, float, float]:
-        status = exp.get("status")
-        if status == ExperimentStatus.RUNNING:
-            status_priority = 0
-        elif status == ExperimentStatus.COMPLETED:
-            status_priority = 1
-        else:
-            status_priority = 2
-        metric_info = _metric_info_for(exp, str(exp.get("target_metric_name") or ""))
-        sort_value = _coerce_float(
-            exp.get("target_metric_value") if exp.get("target_metric_value") is not None else exp.get("metric_value")
-        )
+    def sort_key(exp: dict[str, Any]) -> tuple[Any, ...]:
+        metric_name = _sort_metric_name(exp, sort_settings["metric"])
+        metric_info = _metric_info_for(exp, metric_name)
+        sort_value = _sort_metric_value(exp, metric_name, metric_info, sort_settings)
         has_metric = sort_value is not None
-        metric_sort = _metric_sort_value(sort_value, metric_info)
-        last_ts = _coerce_float(exp.get("last_change_ts")) or 0.0
-        return status_priority, 0 if has_metric else 1, metric_sort, -last_ts
+        metric_sort = _metric_sort_value(sort_value, metric_info, direction=sort_settings["direction"])
+        keys: list[Any] = []
+        if sort_settings["preserve_dataset_groups"]:
+            keys.append(_dataset_group_key(exp))
+        if sort_settings["preserve_state_groups"]:
+            keys.append(_status_priority(exp.get("status")))
+        keys.extend((0 if has_metric else 1, metric_sort))
+        return tuple(keys)
 
     rows.sort(key=sort_key)
     return rows
 
 
-def _metric_sort_value(value: float | None, metric_info: dict[str, Any] | None) -> float:
+def _normalize_table_sort(table_sort: object | None) -> dict[str, Any]:
+    return {
+        "metric": _choice_attr(table_sort, "metric", "primary", {"primary", "secondary"}),
+        "value": _choice_attr(table_sort, "value", "current", {"current", "best"}),
+        "direction": _choice_attr(table_sort, "direction", "auto", {"auto", "asc", "desc"}),
+        "preserve_state_groups": _bool_attr(table_sort, "preserve_state_groups", True),
+        "preserve_dataset_groups": _bool_attr(table_sort, "preserve_dataset_groups", False),
+    }
+
+
+def _choice_attr(settings: object | None, name: str, default: str, choices: set[str]) -> str:
+    value = getattr(settings, name, default)
+    text = str(value).strip().lower() if value is not None else default
+    return text if text in choices else default
+
+
+def _bool_attr(settings: object | None, name: str, default: bool) -> bool:
+    value = getattr(settings, name, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+    return bool(value)
+
+
+def _dataset_group_key(exp: dict[str, Any]) -> str:
+    value = exp.get("dataset_name") or exp.get("dataset") or exp.get("config") or ""
+    return str(value).lower()
+
+
+def _status_priority(status: object) -> int:
+    status = _coerce_status(status)
+    if status == ExperimentStatus.RUNNING:
+        return 0
+    if status == ExperimentStatus.COMPLETED:
+        return 1
+    return 2
+
+
+def _sort_metric_name(exp: dict[str, Any], metric_selector: str) -> str:
+    if metric_selector == "secondary":
+        return str(exp.get("secondary_metric_name") or "")
+    return str(exp.get("target_metric_name") or "")
+
+
+def _sort_metric_value(
+    exp: dict[str, Any],
+    metric_name: str,
+    metric_info: dict[str, Any] | None,
+    sort_settings: dict[str, Any],
+) -> float | None:
+    if sort_settings["value"] == "best":
+        best = _lookup_best_metric_value(exp, metric_name, metric_info)
+        if best is not None:
+            return best
+    if sort_settings["metric"] == "secondary":
+        current = _coerce_float(exp.get("secondary_metric_value"))
+    else:
+        current = _coerce_float(
+            exp.get("target_metric_value") if exp.get("target_metric_value") is not None else exp.get("metric_value")
+        )
+    if current is None and metric_name:
+        current = _lookup_metric_value(exp, metric_name, _metric_shortform(metric_info))
+    return current
+
+
+def _metric_sort_value(value: float | None, metric_info: dict[str, Any] | None, *, direction: str = "auto") -> float:
     if value is None:
         return float("inf")
+    if direction == "asc":
+        return value
+    if direction == "desc":
+        return -value
     higher_better = True if not isinstance(metric_info, dict) else metric_info.get("higher_better", True)
     return -value if higher_better is not False else value
+
+
+def _row_render_signature(exp: dict[str, Any], *, show_sparkline: bool) -> tuple[object, ...]:
+    primary_name = str(exp.get("target_metric_name") or "")
+    secondary_name = str(exp.get("secondary_metric_name") or "")
+    primary_info = _metric_info_for(exp, primary_name)
+    secondary_info = _metric_info_for(exp, secondary_name)
+    primary_current = _coerce_float(
+        exp.get("target_metric_value") if exp.get("target_metric_value") is not None else exp.get("metric_value")
+    )
+    secondary_current = _coerce_float(exp.get("secondary_metric_value"))
+    signature: list[object] = [
+        exp.get("experiment_id"),
+        exp.get("dataset_name") or exp.get("dataset") or exp.get("config"),
+        _format_enum(exp.get("hpc_assignment")),
+        _format_enum(exp.get("status")),
+        exp.get("cancel_requested_at"),
+        exp.get("cancel_requested_job_id"),
+        exp.get("current_step"),
+        exp.get("max_steps"),
+        exp.get("it_per_sec_backbone"),
+        exp.get("current_epoch"),
+        exp.get("max_epochs"),
+        primary_name,
+        primary_current,
+        _lookup_best_metric_value(exp, primary_name, primary_info),
+        _metric_info_signature(primary_info),
+        secondary_name,
+        secondary_current,
+        _lookup_best_metric_value(exp, secondary_name, secondary_info),
+        _metric_info_signature(secondary_info),
+    ]
+    if show_sparkline:
+        signature.append(_sparkline_signature(exp, primary_name))
+        signature.append(_sparkline_signature(exp, secondary_name))
+    return tuple(signature)
+
+
+def _metric_info_signature(metric_info: dict[str, Any] | None) -> tuple[tuple[str, object], ...] | None:
+    if not isinstance(metric_info, dict):
+        return None
+    keys = ("shortform", "higher_better", "threshold", "value_format", "format", "best_key")
+    return tuple((key, _signature_value(metric_info.get(key))) for key in keys if key in metric_info)
+
+
+def _sparkline_signature(exp: dict[str, Any], metric_name: str) -> tuple[object, ...] | None:
+    resolved = _resolve_sparkline_metric(exp, metric_name)
+    if not resolved:
+        return None
+    return (resolved, _higher_better(exp, resolved), _history_metric_change_signature(exp, resolved))
+
+
+def _history_metric_change_signature(exp: dict[str, Any], metric_name: str) -> tuple[int, float | None]:
+    history = exp.get("history")
+    if not isinstance(history, list):
+        return (0, None)
+    n_changes = 0
+    last_value: float | None = None
+    has_last = False
+    for entry in history:
+        metrics = entry.get("metrics") if isinstance(entry, dict) else None
+        if not isinstance(metrics, dict) or metric_name not in metrics:
+            continue
+        value = _coerce_float(metrics.get(metric_name))
+        if value is None:
+            continue
+        if not has_last or value != last_value:
+            n_changes += 1
+            last_value = value
+            has_last = True
+    return n_changes, last_value
+
+
+def _object_signature(value: object) -> tuple[tuple[str, object], ...] | object:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    attrs = getattr(value, "__dict__", None)
+    if isinstance(attrs, dict):
+        return tuple(sorted((str(key), _signature_value(item)) for key, item in attrs.items()))
+    return repr(value)
+
+
+def _signature_value(value: object) -> object:
+    if isinstance(value, (str, int, float, bool, type(None))):
+        return value
+    return repr(value)
 
 
 def _resolve_cursor_row(rows: list[dict[str, Any]], previous_key: str | None, previous_row: int) -> int:
@@ -439,4 +636,4 @@ def _format_queue_delta(exp: dict[str, Any]) -> str:
     return f"{seconds / 3600:.1f}h"
 
 
-__all__ = ["ExperimentsTable"]
+__all__ = ["ExperimentsTable", "table_render_signature"]

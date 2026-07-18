@@ -1072,11 +1072,19 @@ class HPCConnectionManager:
             logger.error(f"Error during standard authentication: {type(e).__name__}: {e}")
             raise
 
-    def run_command(self, hpc_type: HPCType, command: str, prefer_remote: bool = False) -> Tuple[str, str]:
+    def run_submission_command(self, hpc_type: HPCType, command: str) -> Tuple[str, str]:
+        """Run one non-idempotent Slurm submission without transport retry."""
+        return self.run_command(hpc_type, command, prefer_remote=True, retry_on_failure=False)
+
+    def run_command(
+        self, hpc_type: HPCType, command: str, prefer_remote: bool = False, retry_on_failure: bool = True
+    ) -> Tuple[str, str]:
         """
         Run a shell command on HPC.
         - If prefer_remote is True, execute via SSH even when running on that HPC locally.
         - Otherwise, run locally when we are on that HPC; use SSH for non-local.
+        - If retry_on_failure is False, do not re-execute the command after an ambiguous
+          SSH transport failure. Use this for non-idempotent commands such as sbatch.
         Returns stdout, stderr as strings.
         """
         # Remote-preferred path (used for Slurm CLI like sbatch/squeue/scancel)
@@ -1162,6 +1170,9 @@ class HPCConnectionManager:
                 return out, err
             except Exception as e:
                 logger.error(f"Command failed on {hpc_type.name}: {command} ({type(e).__name__}: {e})")
+                if not retry_on_failure:
+                    logger.warning("Not retrying non-idempotent command on %s after transport failure", hpc_type.name)
+                    raise
                 if not getattr(self, '_reconnecting', False):
                     logger.info(f"Attempting to reconnect to {hpc_type.name}")
                     self._reconnecting = True
@@ -1172,7 +1183,7 @@ class HPCConnectionManager:
                         self.close(hpc_type)
                         self.connect(hpc_type, force_remote=True)
                     self._reconnecting = False
-                    return self.run_command(hpc_type, command, prefer_remote=True)
+                    return self.run_command(hpc_type, command, prefer_remote=True, retry_on_failure=retry_on_failure)
                 else:
                     logger.error("Already attempting reconnection")
                     raise
@@ -1190,7 +1201,7 @@ class HPCConnectionManager:
         if not self._connected.get(hpc_type, False):
             logger.debug(f"Not connected to {hpc_type.name}, connecting first...")
             self.connect(hpc_type)
-            return self.run_command(hpc_type, command)
+            return self.run_command(hpc_type, command, retry_on_failure=retry_on_failure)
         client = self._clients[hpc_type]
         try:
             logger.debug(f"Running remote command on {hpc_type.name}: {command}")
@@ -1202,13 +1213,16 @@ class HPCConnectionManager:
             return out, err
         except Exception as e:
             logger.error(f"Command failed on {hpc_type.name}: {command} ({type(e).__name__}: {e})")
+            if not retry_on_failure:
+                logger.warning("Not retrying non-idempotent command on %s after transport failure", hpc_type.name)
+                raise
             if not getattr(self, '_reconnecting', False):
                 logger.info(f"Attempting to reconnect to {hpc_type.name}")
                 self._reconnecting = True
                 self.close(hpc_type)
                 self.connect(hpc_type)
                 self._reconnecting = False
-                return self.run_command(hpc_type, command)
+                return self.run_command(hpc_type, command, retry_on_failure=retry_on_failure)
             else:
                 logger.error("Already attempting reconnection")
                 raise

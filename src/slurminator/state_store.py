@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from slurminator.experiments import ExperimentStatus
 from slurminator.config import HPCType
+from slurminator.experiments import ExperimentStatus
 from slurminator.experiments.yaml_utils import dump_yaml, load_yaml
+from slurminator.hpc_state import is_terminal_status
+from slurminator.submission_journal import SubmissionReceipt, SubmissionReceiptJournal
 
 logger = logging.getLogger("slurminator")
 
@@ -20,10 +23,17 @@ class ExperimentStateStore:
     def __init__(self, experiment_file: str | Path, concurrency_limits: Mapping[HPCType, int] | None = None) -> None:
         self.experiment_file = Path(experiment_file)
         self.concurrency_limits = concurrency_limits or {}
+        self.submission_journal = SubmissionReceiptJournal(self.experiment_file)
+        self._warned_unpolled_hpcs: set[object] = set()
 
     def load(self) -> dict[str, Any]:
         """Load experiment YAML and ensure a dict with an ``experiments`` list."""
         if not self.experiment_file.exists():
+            if self.submission_journal.path.exists():
+                raise FileNotFoundError(
+                    f"Experiment ledger {self.experiment_file} is missing while durable submission receipts remain "
+                    f"at {self.submission_journal.path}"
+                )
             logger.error("File not found: %s", self.experiment_file)
             return {"experiments": []}
 
@@ -39,12 +49,33 @@ class ExperimentStateStore:
             data["experiments"] = []
 
         self._coerce_experiment_rows(data["experiments"])
+        replayed_receipts = self.submission_journal.apply(data)
+        self._warn_about_zero_limit_active_rows(data["experiments"])
+        if replayed_receipts:
+            self.save(data)
+            logger.warning(
+                "Recovered %d accepted submission(s) from %s.", replayed_receipts, self.submission_journal.path
+            )
         return data
 
     def save(self, data: Mapping[str, Any]) -> None:
-        """Persist experiment YAML using the package YAML dumper."""
-        dump_yaml(dict(data), str(self.experiment_file))
+        """Merge submission receipts, then persist and checkpoint the ledger."""
+        checkpoint = dict(data)
+        journal_exists = self.submission_journal.path.exists()
+        self.submission_journal.apply(checkpoint)
+        dump_yaml(checkpoint, str(self.experiment_file))
+        if journal_exists:
+            # ``dump_yaml`` atomically replaces the file. Make both its data
+            # and directory entry durable before deleting the only compact
+            # record of accepted submissions.
+            _fsync_file(self.experiment_file)
+            _fsync_directory(self.experiment_file.parent)
+            self.submission_journal.clear()
         logger.debug("Saved updated YAML => %s", self.experiment_file)
+
+    def record_submission(self, experiment: Mapping[str, Any], previous_job_id: str | None = None) -> SubmissionReceipt:
+        """Durably record one accepted submission without rewriting the full ledger."""
+        return self.submission_journal.append_experiment(experiment, previous_job_id)
 
     def _load_backup_after_parse_error(self, exc: Exception) -> dict[str, Any]:
         """Try to recover from a truncated/corrupted YAML file via its ``.bak``."""
@@ -96,7 +127,12 @@ class ExperimentStateStore:
                         exp.get("experiment_id"),
                     )
 
-            if hpc_assignment and self.concurrency_limits.get(hpc_assignment, 0) == 0:
+            if (
+                hpc_assignment
+                and self.concurrency_limits.get(hpc_assignment, 0) == 0
+                and not exp.get("job_id")
+                and not is_terminal_status(exp.get("status"))
+            ):
                 logger.warning(
                     "Experiment %s assigned to disabled HPC %s - resetting to PENDING",
                     exp.get("experiment_id"),
@@ -104,6 +140,59 @@ class ExperimentStateStore:
                 )
                 exp["hpc_assignment"] = None
                 exp["status"] = ExperimentStatus.PENDING
+
+    def _warn_about_zero_limit_active_rows(self, experiments: object) -> None:
+        """Warn about accepted active jobs whose HPC has a zero submission limit."""
+        if not isinstance(experiments, list):
+            return
+
+        unpolled_by_hpc: dict[object, list[dict[str, Any]]] = {}
+        for exp in experiments:
+            if not isinstance(exp, dict):
+                continue
+            hpc_assignment = exp.get("hpc_assignment")
+            if (
+                exp.get("status") in {ExperimentStatus.QUEUED, ExperimentStatus.RUNNING}
+                and exp.get("job_id")
+                and hpc_assignment
+                and self.concurrency_limits.get(hpc_assignment, 0) == 0
+            ):
+                unpolled_by_hpc.setdefault(hpc_assignment, []).append(exp)
+
+        active_hpcs = set(unpolled_by_hpc)
+        self._warned_unpolled_hpcs.intersection_update(active_hpcs)
+        for hpc_assignment, rows in unpolled_by_hpc.items():
+            if hpc_assignment in self._warned_unpolled_hpcs:
+                continue
+            example_ids = ", ".join(str(exp.get("experiment_id")) for exp in rows[:3])
+            logger.warning(
+                "%d accepted active experiment(s) on disabled HPC %s are preserving scheduler state. "
+                "Existing jobs remain pollable only if that HPC was connected at startup; otherwise restart "
+                "with a positive limit (examples: %s).",
+                len(rows),
+                hpc_assignment,
+                example_ids,
+            )
+            self._warned_unpolled_hpcs.add(hpc_assignment)
+
+
+def _fsync_file(path: Path) -> None:
+    """Make the contents of one existing file durable."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_directory(path: Path) -> None:
+    """Make a directory-entry update durable."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def replace_exp_in_list(experiments: list[dict[str, Any]], new_exp: dict[str, Any]) -> list[dict[str, Any]]:
