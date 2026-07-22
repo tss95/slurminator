@@ -72,6 +72,10 @@ def test_handle_cancel_run_issues_scancel_for_active_run(tmp_path) -> None:
     )
 
     assert connection.commands == [(HPCType.OLIVIA, "scancel 12345", True)]
+    assert exps[0]["status"] == ExperimentStatus.RUNNING
+    assert exps[0]["cancel_requested_job_id"] == "12345"
+    assert isinstance(exps[0]["cancel_requested_at"], float)
+    assert exps[0]["last_change_ts"] == exps[0]["cancel_requested_at"]
 
 
 def test_handle_cancel_run_ignores_inactive_or_missing_run(tmp_path) -> None:
@@ -106,6 +110,12 @@ def test_handle_cancel_all_issues_scancel_for_all_active_runs(tmp_path) -> None:
 
     assert orchestrator.submissions_paused is True
     assert connection.commands == [(HPCType.OLIVIA, "scancel 1", True), (HPCType.FOX, "scancel 2", True)]
+    assert exps[0]["status"] == "queued"
+    assert exps[1]["status"] == ExperimentStatus.RUNNING
+    assert exps[2]["status"] == ExperimentStatus.COMPLETED
+    assert exps[0]["cancel_requested_job_id"] == "1"
+    assert exps[1]["cancel_requested_job_id"] == "2"
+    assert exps[0]["cancel_requested_at"] == exps[1]["cancel_requested_at"]
 
 
 def test_handle_relaunch_run_resets_terminal_experiment_for_submission(tmp_path) -> None:

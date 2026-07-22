@@ -250,6 +250,28 @@ class TextualDashboardApp(App[None]):
         margin-right: 1;
     }
 
+    #table-sort-form {
+        width: 58;
+        height: auto;
+        max-height: 18;
+        border: solid $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #table-sort-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #table-sort-message {
+        margin-bottom: 1;
+    }
+
+    #table-sort-options {
+        height: 9;
+    }
+
     #help-screen {
         width: 64;
         height: auto;
@@ -325,6 +347,7 @@ class TextualDashboardApp(App[None]):
         *,
         headless: bool = False,
         sparkline_thresholds: SparklineThresholds | object | None = None,
+        table_sort: object | None = None,
         **kwargs: Any,
     ) -> None:
         app_title = str(kwargs.pop("title", "Slurminator"))
@@ -339,8 +362,10 @@ class TextualDashboardApp(App[None]):
         self.orchestrator: Any | None = None
         self.sparkline_enabled = True
         self.sparkline_thresholds = sparkline_thresholds or SparklineThresholds()
+        self.table_sort = table_sort
         self.dashboard_exit_requested = False
         self._dashboard_snapshot: list[dict[str, Any]] = []
+        self._dashboard_snapshot_version = 0
         self._snapshot_lock = threading.Lock()
         self._run_thread: threading.Thread | None = None
         self._run_error: BaseException | None = None
@@ -359,6 +384,14 @@ class TextualDashboardApp(App[None]):
 
     def render(self, exps: list[dict[str, Any]]) -> None:
         """Receive an orchestrator poll-complete signal."""
+        if self.orchestrator is not None and getattr(self.orchestrator, "_dashboard_snapshot", None) is not None:
+            try:
+                orchestrator_version = int(getattr(self.orchestrator, "_dashboard_snapshot_version", 0))
+            except (TypeError, ValueError):
+                orchestrator_version = 0
+            if orchestrator_version > 0:
+                self._dashboard_snapshot_version = orchestrator_version
+                return None
         self.notify_poll_complete(exps)
         return None
 
@@ -369,8 +402,10 @@ class TextualDashboardApp(App[None]):
     def notify_poll_complete(self, exps: list[dict[str, Any]]) -> None:
         """Swap the latest experiment snapshot for Textual screens to read."""
         snapshot = copy.deepcopy(exps)
+        self._dashboard_snapshot_version += 1
         if self.orchestrator is not None:
             self.orchestrator._dashboard_snapshot = snapshot
+            self.orchestrator._dashboard_snapshot_version = self._dashboard_snapshot_version
         with self._snapshot_lock:
             self._dashboard_snapshot = snapshot
 
@@ -383,6 +418,16 @@ class TextualDashboardApp(App[None]):
                 return list(snapshot)
         with self._snapshot_lock:
             return list(self._dashboard_snapshot)
+
+    def dashboard_snapshot_version(self) -> int:
+        """Return a monotonically increasing dashboard snapshot version."""
+        orchestrator = self.orchestrator
+        if orchestrator is not None:
+            try:
+                return int(getattr(orchestrator, "_dashboard_snapshot_version", self._dashboard_snapshot_version))
+            except (TypeError, ValueError):
+                return self._dashboard_snapshot_version
+        return self._dashboard_snapshot_version
 
     def command_save_path(self) -> Path:
         """Return the command queue root used by dashboard-side commands."""
@@ -424,6 +469,15 @@ class TextualDashboardApp(App[None]):
         if self.orchestrator is not None:
             setattr(self.orchestrator, "_dashboard_exit_requested", True)
         self.exit()
+
+    def apply_table_sort(self, table_sort: object) -> None:
+        """Apply runtime table sort settings and refresh the home table when mounted."""
+        self.table_sort = table_sort
+        for screen in getattr(self, "screen_stack", []):
+            if isinstance(screen, HomeScreen):
+                screen.refresh_from_orchestrator(force=True)
+                break
+        self.refresh(layout=True)
 
     def action_global_menu(self) -> None:
         """Open the global action menu."""

@@ -9,11 +9,16 @@ from slurminator.experiment_policy import (
     resolve_resource_overrides,
     resolve_sbatch_export_vars,
 )
+from slurminator.metrics import MetricColumnSpec, MetricLayout, MetricLayoutFactory, StaticMetricLayoutFactory
 
 __all__ = [
     "expand_slurm_state",
     "is_terminal_status",
     "map_scheduler_state_to_experiment_status",
+    "MetricColumnSpec",
+    "MetricLayout",
+    "MetricLayoutFactory",
+    "StaticMetricLayoutFactory",
     "project_status_to_experiment",
     "resolve_extra_remote_dirs",
     "resolve_pinned_hpc",

@@ -8,6 +8,7 @@ from shlex import quote, split
 from typing import Any, Protocol, runtime_checkable
 
 from slurminator.experiments.status_enum import ExperimentStatus
+from slurminator.metrics import MetricLayoutFactory
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,9 @@ class OrchestratorPlugin(Protocol):
     def annotate_log_tail(self, *, exp: dict[str, Any], log_tail: str) -> None:
         """Optionally annotate an experiment row from job logs."""
 
+    def metric_layout_factory(self) -> MetricLayoutFactory | None:
+        """Return an optional task-aware metric layout factory for training callbacks."""
+
 
 class DefaultOrchestratorPlugin:
     """Default plugin with explicit-command support and no project-specific hooks."""
@@ -81,6 +85,10 @@ class DefaultOrchestratorPlugin:
 
     def annotate_log_tail(self, *, exp: dict[str, Any], log_tail: str) -> None:
         """Default plugin does not annotate experiment rows from logs."""
+
+    def metric_layout_factory(self) -> MetricLayoutFactory | None:
+        """No project-specific metric layout factory by default."""
+        return None
 
 
 @dataclass

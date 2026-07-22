@@ -18,6 +18,7 @@ def _status(**kwargs):
         metrics=kwargs.get("metrics") or {},
         primary_metric=kwargs.get("primary"),
         secondary_metric=kwargs.get("secondary"),
+        metric_columns=kwargs.get("metric_columns"),
         metric_info=kwargs.get("metric_info") or {},
         links=kwargs.get("links") or {},
     )
@@ -38,7 +39,7 @@ def test_project_status_to_experiment_uses_generic_defaults() -> None:
 
     updated = project_status_to_experiment(exp, status)
 
-    assert exp["status_schema_version"] == "1.1"
+    assert exp["status_schema_version"] == "1.2"
     assert exp["status_experiment_id"] == "exp-1"
     assert exp["progress_unit"] == "epoch"
     assert exp["progress"]["unit"] == "epoch"
@@ -52,6 +53,25 @@ def test_project_status_to_experiment_uses_generic_defaults() -> None:
     assert exp["all_metrics"]["acc"] == 0.91
     assert exp["display_metric_info"]["val/acc"]["best_key"] == "val/global_best_acc"
     assert "status_run_name" in updated
+
+
+def test_project_status_to_experiment_projects_metric_columns() -> None:
+    status = _status(
+        metrics={"val/acc": 0.91, "val/loss": 0.2, "debug/raw": 7.0},
+        metric_columns=[
+            {"key": "val/acc", "shortform": "acc", "higher_better": True},
+            {"key": "val/loss", "shortform": "loss", "higher_better": False},
+        ],
+    )
+    exp: dict = {}
+
+    project_status_to_experiment(exp, status)
+
+    assert exp["all_metrics"]["debug/raw"] == 7.0
+    assert [column["key"] for column in exp["display_metric_columns"]] == ["val/acc", "val/loss"]
+    assert exp["target_metric_name"] == "val/acc"
+    assert exp["secondary_metric_name"] == "val/loss"
+    assert exp["acc"] == 0.91
 
 
 def test_project_status_to_experiment_supports_project_specific_aliases() -> None:

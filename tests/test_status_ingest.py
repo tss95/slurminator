@@ -88,6 +88,86 @@ def test_update_running_experiment_info_merges_incremental_history() -> None:
     assert exp["history"][1]["metrics"] == {"train/loss": 0.8}
     assert exp["history_attempt_max"] == 1
     assert exp["history_last_read_offset"] == len(history_payload.encode("utf-8"))
+    assert exp["last_metrics_update"] == 100.0
+
+
+def test_changed_status_persists_immediately_by_default() -> None:
+    connection = FakeStatusConnection(status_payload=_status_json())
+    loaded_data = {"experiments": [{"experiment_id": "exp-1"}]}
+    saved: list[dict] = []
+    context = StatusIngestContext(
+        connection_manager=connection, hpc_configs={}, load_yaml=lambda: loaded_data, save_yaml=saved.append
+    )
+    exp = {
+        "experiment_id": "exp-1",
+        "status": ExperimentStatus.COMPLETED,
+        "job_id": "12345",
+        "hpc_assignment": HPCType.OLIVIA,
+        "save_path": "/save",
+    }
+
+    update_running_experiment_info(exp, context)
+
+    assert saved == [loaded_data]
+    assert loaded_data["experiments"][0]["last_metrics_update"] == 100.0
+    assert exp["last_metrics_update"] == 100.0
+
+
+def test_failed_immediate_persistence_does_not_mark_status_as_ingested() -> None:
+    connection = FakeStatusConnection(status_payload=_status_json())
+    loaded_data = {"experiments": [{"experiment_id": "exp-1"}]}
+
+    def fail_save(_data: dict) -> None:
+        raise RuntimeError("simulated write failure")
+
+    context = StatusIngestContext(
+        connection_manager=connection, hpc_configs={}, load_yaml=lambda: loaded_data, save_yaml=fail_save
+    )
+    exp = {
+        "experiment_id": "exp-1",
+        "status": ExperimentStatus.COMPLETED,
+        "job_id": "12345",
+        "hpc_assignment": HPCType.OLIVIA,
+        "save_path": "/save",
+    }
+
+    update_running_experiment_info(exp, context)
+
+    assert "last_metrics_update" not in exp
+
+
+def test_changed_status_can_be_ingested_in_memory_without_ledger_io() -> None:
+    history_payload = _history_line(epoch=1, loss=0.4)
+    connection = FakeStatusConnection(status_payload=_status_json(), history_payload=history_payload)
+
+    def unexpected_load() -> dict:
+        raise AssertionError("in-memory ingestion must not reload the experiment ledger")
+
+    def unexpected_save(_data: dict) -> None:
+        raise AssertionError("in-memory ingestion must not rewrite the experiment ledger")
+
+    context = StatusIngestContext(
+        connection_manager=connection,
+        hpc_configs={},
+        load_yaml=unexpected_load,
+        save_yaml=unexpected_save,
+        persist_immediately=False,
+    )
+    exp = {
+        "experiment_id": "exp-1",
+        "status": ExperimentStatus.RUNNING,
+        "job_id": "12345",
+        "hpc_assignment": HPCType.OLIVIA,
+        "save_path": "/save",
+    }
+
+    data = update_running_experiment_info(exp, context)
+
+    assert data is not None
+    assert exp["all_metrics"] == {"train/loss": 0.5}
+    assert exp["current_epoch"] == 1
+    assert exp["last_metrics_update"] == 100.0
+    assert exp["history"] == [HistoryEntry.model_validate_json(history_payload).model_dump(mode="json")]
 
 
 def test_force_read_full_history_resets_offset_and_replaces_history() -> None:
@@ -126,3 +206,63 @@ def test_terminal_history_is_bounded_once_status_is_ingested() -> None:
     assert len(exp["history"]) == HISTORY_TERMINAL_BOUND
     assert exp["history"][0] == {"epoch": 5}
     assert exp["history_truncated"] is True
+    assert exp["last_metrics_update"] == 100.0
+
+
+def test_unchanged_terminal_status_skips_history_and_ledger_persistence() -> None:
+    connection = FakeStatusConnection(status_payload=_status_json(), history_payload=_history_line())
+
+    def unexpected_load() -> dict:
+        raise AssertionError("unchanged telemetry must not reload the experiment ledger")
+
+    def unexpected_save(_data: dict) -> None:
+        raise AssertionError("unchanged telemetry must not rewrite the experiment ledger")
+
+    context = StatusIngestContext(
+        connection_manager=connection, hpc_configs={}, load_yaml=unexpected_load, save_yaml=unexpected_save
+    )
+    exp = {
+        "experiment_id": "exp-1",
+        "status": ExperimentStatus.COMPLETED,
+        "job_id": "12345",
+        "hpc_assignment": HPCType.OLIVIA,
+        "save_path": "/save",
+        "last_metrics_update": 100.0,
+        "history": [{"epoch": idx} for idx in range(HISTORY_TERMINAL_BOUND + 5)],
+    }
+
+    data = update_running_experiment_info(exp, context)
+
+    assert data is not None
+    assert data["last_update"] == 100.0
+    assert len(exp["history"]) == HISTORY_TERMINAL_BOUND
+    assert exp["history_truncated"] is True
+    assert connection.commands == [(HPCType.OLIVIA, "cat /save/.orchestrator_status/status_12345.json 2>/dev/null")]
+
+
+def test_unchanged_running_status_still_merges_new_history_without_ledger_persistence() -> None:
+    history_payload = _history_line(epoch=2, loss=0.8)
+    connection = FakeStatusConnection(status_payload=_status_json(), history_payload=history_payload)
+
+    def unexpected_load() -> dict:
+        raise AssertionError("unchanged telemetry must not reload the experiment ledger")
+
+    def unexpected_save(_data: dict) -> None:
+        raise AssertionError("unchanged telemetry must not rewrite the experiment ledger")
+
+    context = StatusIngestContext(
+        connection_manager=connection, hpc_configs={}, load_yaml=unexpected_load, save_yaml=unexpected_save
+    )
+    exp = {
+        "experiment_id": "exp-1",
+        "status": ExperimentStatus.RUNNING,
+        "job_id": "12345",
+        "hpc_assignment": HPCType.OLIVIA,
+        "save_path": "/save",
+        "last_metrics_update": 100.0,
+    }
+
+    update_running_experiment_info(exp, context)
+
+    assert exp["history"] == [HistoryEntry.model_validate_json(history_payload).model_dump(mode="json")]
+    assert exp["history_last_read_offset"] == len(history_payload.encode("utf-8"))

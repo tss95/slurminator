@@ -68,6 +68,7 @@ def update_scheduler_statuses(
     gather_logs: GatherLogs,
 ) -> None:
     """Poll queued/running experiments and update scheduler-owned status fields."""
+    configured_hpcs = getattr(connection_manager, "configs", None)
     pollmap: dict[HPCType, list[tuple[dict[str, Any], str]]] = {}
     for exp in experiments:
         status = exp.get("status")
@@ -75,7 +76,8 @@ def update_scheduler_statuses(
             continue
         job_id = exp.get("job_id")
         hpc = exp.get("hpc_assignment")
-        if job_id and hpc and concurrency_limits.get(hpc, 0) > 0:
+        hpc_is_pollable = not isinstance(configured_hpcs, Mapping) or hpc in configured_hpcs
+        if job_id and hpc and hpc_is_pollable:
             pollmap.setdefault(hpc, []).append((exp, job_id))
 
     for hpc_type, exp_job_pairs in pollmap.items():

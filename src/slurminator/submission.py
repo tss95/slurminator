@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -21,6 +22,7 @@ logger = logging.getLogger("slurminator")
 
 CommandBuilder = Callable[[dict[str, Any], int, HPCType], str]
 SaveYaml = Callable[[dict[str, Any]], None]
+RecordSubmission = Callable[[Mapping[str, Any], str | None], object]
 ReplaceExperiment = Callable[[list[dict[str, Any]], dict[str, Any]], list[dict[str, Any]]]
 SubmitExperiment = Callable[[dict[str, Any], HPCType], str | None]
 IsLocalHPC = Callable[[HPCType], bool]
@@ -40,6 +42,7 @@ class SubmissionContext:
     time_hours_override: int | None = None
     memory_gb_override: int | None = None
     partition_overrides: Mapping[HPCType, str] = field(default_factory=dict)
+    prepared_repositories: set[HPCType] | None = None
 
 
 def maybe_submit(
@@ -52,11 +55,12 @@ def maybe_submit(
     submit_experiment: SubmitExperiment,
     replace_exp_in_list: ReplaceExperiment,
     save_yaml: SaveYaml,
-) -> None:
-    """Submit a pending/partial experiment when concurrency allows."""
+    record_submission: RecordSubmission | None = None,
+) -> bool:
+    """Submit a pending/partial experiment and return whether submission succeeded."""
     status = exp.get("status")
     if status not in [ExperimentStatus.PENDING, ExperimentStatus.PARTIAL]:
-        return
+        return False
 
     forced_hpc = resolve_pinned_hpc(exp, hpc_configs)
     if forced_hpc and exp.get("hpc_assignment") != forced_hpc:
@@ -67,7 +71,7 @@ def maybe_submit(
         chosen = _choose_hpc(concurrency_used, concurrency_limits)
         if not chosen:
             logger.debug("%s: no HPC free => remain PENDING", exp["experiment_id"])
-            return
+            return False
         exp["hpc_assignment"] = chosen
         hpc_type = chosen
 
@@ -75,26 +79,31 @@ def maybe_submit(
     if limit <= 0:
         logger.warning("%s: assigned to %s with limit 0 – skipping submission.", exp["experiment_id"], hpc_type)
         exp["hpc_assignment"] = None
-        return
+        return False
 
     used = concurrency_used.get(hpc_type, 0)
     if used >= limit:
         logger.debug("HPC %s concurrency limit => %s/%s", hpc_type, used, limit)
-        return
+        return False
 
     logger.info("Submitting %s => HPC=%s, usage=%s/%s", exp["experiment_id"], hpc_type, used, limit)
+    previous_job_id = _optional_job_id(exp.get("job_id"))
     exp["git_sha_at_submission"] = capture_provenance()
     job_id = submit_experiment(exp, hpc_type)
     if not job_id:
-        return
+        return False
 
     logger.info("Got job_id=%s => %s => QUEUED", job_id, exp["experiment_id"])
-    concurrency_used[hpc_type] = used + 1
     exp["status"] = ExperimentStatus.QUEUED
     exp["job_id"] = job_id
     exp["queued_timestamp"] = time.time()
     data["experiments"] = replace_exp_in_list(data["experiments"], exp)
-    save_yaml(data)
+    if record_submission is None:
+        save_yaml(data)
+    else:
+        record_submission(exp, previous_job_id)
+    concurrency_used[hpc_type] = used + 1
+    return True
 
 
 def submit_experiment_universal(exp: dict[str, Any], hpc_type: HPCType, context: SubmissionContext) -> str | None:
@@ -137,15 +146,23 @@ def submit_experiment_universal(exp: dict[str, Any], hpc_type: HPCType, context:
     )
     logger.debug("sbatch command: %s", sbatch_command)
 
-    _prepare_repo_for_submission(hpc_type, cluster_config, context.connection_manager)
-    out, err = context.connection_manager.run_command(hpc_type, sbatch_command, prefer_remote=True)
+    if context.prepared_repositories is None or hpc_type not in context.prepared_repositories:
+        _prepare_repo_for_submission(hpc_type, cluster_config, context.connection_manager)
+        if context.prepared_repositories is not None:
+            context.prepared_repositories.add(hpc_type)
+    submission_runner = getattr(context.connection_manager, "run_submission_command", None)
+    if callable(submission_runner):
+        out, err = submission_runner(hpc_type, sbatch_command)
+    else:
+        # Compatibility path for injected connection-manager implementations.
+        # The built-in manager always uses ``run_submission_command`` so an
+        # ambiguous transport failure cannot re-execute sbatch.
+        out, err = context.connection_manager.run_command(hpc_type, sbatch_command, prefer_remote=True)
+    job_id = _parse_sbatch_job_id(out)
 
-    if err.strip():
-        logger.error("sbatch error HPC=%s, exp=%s: %s", hpc_type, job_name, err)
-        return None
-
-    if out.strip().startswith("Submitted batch job"):
-        job_id = out.strip().split()[-1]
+    if job_id is not None:
+        if err.strip():
+            logger.warning("sbatch warning HPC=%s, exp=%s: %s", hpc_type, job_name, err.strip())
         exp["output_dir"] = str(exp_output_dir)
         exp["save_path"] = cluster_config.save_path
         exp["requested_time_hours"] = int(resources.time_hours)
@@ -154,7 +171,9 @@ def submit_experiment_universal(exp: dict[str, Any], hpc_type: HPCType, context:
         logger.info("Parsed job_id=%s from sbatch output for %s", job_id, job_name)
         return job_id
 
-    logger.error("Could not parse job_id from sbatch output.")
+    if err.strip():
+        logger.error("sbatch error HPC=%s, exp=%s: %s", hpc_type, job_name, err.strip())
+    logger.error("Could not parse job_id from sbatch output: %r", out.strip())
     return None
 
 
@@ -241,6 +260,7 @@ def build_sbatch_command(
     """Build the sbatch command string for one experiment."""
     sbatch = [
         "sbatch",
+        "--parsable",
         f"--partition={partition}",
         f"--account={cluster_config.account}",
         f"--job-name={job_name}",
@@ -306,6 +326,31 @@ def build_sbatch_command(
         ]
     )
     return " ".join(item for item in sbatch if item)
+
+
+def _parse_sbatch_job_id(output: str) -> str | None:
+    """Return a Slurm job ID from parsable or legacy ``sbatch`` output."""
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        parsable_job_id = stripped.split(";", maxsplit=1)[0]
+        if re.fullmatch(r"[0-9]+", parsable_job_id):
+            return parsable_job_id
+
+        legacy_match = re.fullmatch(r"Submitted batch job ([0-9]+)", stripped)
+        if legacy_match is not None:
+            return legacy_match.group(1)
+    return None
+
+
+def _optional_job_id(value: object) -> str | None:
+    """Normalize an existing job ID before a retry replaces it."""
+    if value is None:
+        return None
+    job_id = str(value).strip()
+    return job_id or None
 
 
 def _choose_hpc(concurrency_used: Mapping[HPCType, int], concurrency_limits: Mapping[HPCType, int]) -> HPCType | None:

@@ -127,6 +127,13 @@ def test_load_user_config_uses_repo_orchestrator_override(tmp_path: Path) -> Non
                 "    flat_slope_norm: 0.02",
                 "    directional_slope_norm: 0.05",
                 "    oscillation_residual_norm: 0.2",
+                "  table:",
+                "    sort:",
+                "      metric: secondary",
+                "      value: best",
+                "      direction: asc",
+                "      preserve_state_groups: false",
+                "      preserve_dataset_groups: true",
                 "retry:",
                 "  retry_timeout_with_estimated_time: true",
                 "  timeout_retry_buffer: 1.5",
@@ -149,6 +156,11 @@ def test_load_user_config_uses_repo_orchestrator_override(tmp_path: Path) -> Non
     assert loaded.orchestrator.dashboard.sparkline.flat_slope_norm == pytest.approx(0.02)
     assert loaded.orchestrator.dashboard.sparkline.directional_slope_norm == pytest.approx(0.05)
     assert loaded.orchestrator.dashboard.sparkline.oscillation_residual_norm == pytest.approx(0.2)
+    assert loaded.orchestrator.dashboard.table_sort.metric == "secondary"
+    assert loaded.orchestrator.dashboard.table_sort.value == "best"
+    assert loaded.orchestrator.dashboard.table_sort.direction == "asc"
+    assert loaded.orchestrator.dashboard.table_sort.preserve_state_groups is False
+    assert loaded.orchestrator.dashboard.table_sort.preserve_dataset_groups is True
     assert loaded.orchestrator.retry.retry_timeout_with_estimated_time is True
     assert loaded.orchestrator.retry.timeout_retry_buffer == pytest.approx(1.5)
     assert loaded.orchestrator.retry.timeout_retry_max_attempts == 2

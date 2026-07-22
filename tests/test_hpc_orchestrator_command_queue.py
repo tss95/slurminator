@@ -58,6 +58,9 @@ def test_orchestrator_process_command_queue_dispatches_cancel_run(tmp_path) -> N
     assert orchestrator._process_command_queue(exps) == 1
 
     assert connection.commands == [(HPCType.OLIVIA, "scancel 12345", True)]
+    assert exps[0]["status"] == ExperimentStatus.RUNNING
+    assert exps[0]["cancel_requested_job_id"] == "12345"
+    assert isinstance(exps[0]["cancel_requested_at"], float)
 
 
 def test_orchestrator_process_command_queue_noops_without_commands(tmp_path) -> None:

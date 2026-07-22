@@ -14,6 +14,7 @@ from slurminator.config.cluster_detection import determine_current_hpc, is_curre
 from slurminator.config.orchestrator_config import (
     CommandSettings,
     DashboardSettings,
+    DashboardTableSortSettings,
     OrchestratorSettings,
     PollSettings,
     RetrySettings,
@@ -36,6 +37,7 @@ from slurminator.config.user_config_loader import (
 
 __all__ = [
     "DashboardSettings",
+    "DashboardTableSortSettings",
     "HPCClusterConfig",
     "HPC_CONFIG_FILE_ENV",
     "HPCParameters",

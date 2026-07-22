@@ -16,6 +16,11 @@ from slurminator.config.cluster_registry import HPCPartition, HPCType
 from slurminator.experiments.status_enum import ExperimentStatus
 
 try:
+    from yaml import CSafeLoader as _SafeLoader
+except ImportError:  # pragma: no cover - depends on how PyYAML was built
+    from yaml import SafeLoader as _SafeLoader
+
+try:
     from yaml.scalarstring import LiteralScalarString  # type: ignore
     from yaml.scalarstring import SingleQuotedScalarString  # type: ignore
 except ModuleNotFoundError:  # pragma: no cover - older PyYAML shim
@@ -46,7 +51,7 @@ class NoAliasDumper(yaml.Dumper):
         return True
 
 
-class ExperimentYAMLLoader(yaml.SafeLoader):
+class ExperimentYAMLLoader(_SafeLoader):
     """YAML loader with orchestrator enum support."""
 
 

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from slurminator.schemas.status_schema import (
     Display,
+    MetricColumn,
     MetricInfo,
     OrchestratorStatus,
     Progress,
@@ -55,6 +56,7 @@ def normalize_status_payload(
     metrics: Mapping[str, object] | None = None,
     primary_metric: str | None = None,
     secondary_metric: str | None = None,
+    metric_columns: Sequence[object] | None = None,
     metric_info: Mapping[str, MetricDisplayCandidate | MetricInfo | Mapping[str, object]] | None = None,
     links: Mapping[str, object] | None = None,
 ) -> OrchestratorStatus:
@@ -65,9 +67,27 @@ def normalize_status_payload(
     """
 
     clean_metrics = _filter_finite_numeric_metrics(metrics or {})
-    clean_metric_info = _materialize_metric_info(metric_info or {}, present_metric_keys=set(clean_metrics))
-    clean_primary = _materialize_metric_reference(primary_metric, present_metric_keys=set(clean_metrics))
-    clean_secondary = _materialize_metric_reference(secondary_metric, present_metric_keys=set(clean_metrics))
+    present_metric_keys = set(clean_metrics)
+    clean_columns = _materialize_metric_columns(metric_columns or (), present_metric_keys=present_metric_keys)
+    clean_metric_info = _materialize_metric_info(metric_info or {}, present_metric_keys=present_metric_keys)
+    for column in clean_columns:
+        clean_metric_info.setdefault(
+            column.key,
+            MetricInfo(
+                shortform=column.shortform,
+                higher_better=column.higher_better,
+                format=column.format,
+                threshold=column.threshold,
+                best_key=column.best_key,
+            ),
+        )
+
+    clean_primary = _materialize_metric_reference(primary_metric, present_metric_keys=present_metric_keys)
+    clean_secondary = _materialize_metric_reference(secondary_metric, present_metric_keys=present_metric_keys)
+    if clean_primary is None and clean_columns:
+        clean_primary = clean_columns[0].key
+    if clean_secondary is None and len(clean_columns) > 1:
+        clean_secondary = clean_columns[1].key
     progress_block = _build_progress(progress)
 
     return OrchestratorStatus(
@@ -81,6 +101,7 @@ def normalize_status_payload(
             run_name=run_name,
             primary_metric=clean_primary,
             secondary_metric=clean_secondary,
+            metric_columns=clean_columns,
             metric_info=clean_metric_info,
         ),
         links=_filter_links(links or {}),
@@ -163,6 +184,52 @@ def _materialize_metric_info(
             continue
         materialized[stripped_key] = _coerce_metric_info(candidate)
     return materialized
+
+
+def _materialize_metric_columns(
+    metric_columns: Sequence[object], *, present_metric_keys: set[str]
+) -> list[MetricColumn]:
+    materialized: list[MetricColumn] = []
+    seen: set[str] = set()
+    for column in metric_columns:
+        coerced = _coerce_metric_column(column)
+        if coerced is None:
+            continue
+        if coerced.key not in present_metric_keys or coerced.key in seen:
+            continue
+        materialized.append(coerced)
+        seen.add(coerced.key)
+    return materialized
+
+
+def _coerce_metric_column(candidate: object) -> MetricColumn | None:
+    if isinstance(candidate, MetricColumn):
+        return candidate
+    if isinstance(candidate, Mapping):
+        key = _optional_string(candidate.get("key"))
+        if not key:
+            return None
+        return MetricColumn(
+            key=key,
+            shortform=_optional_string(candidate.get("shortform")) or _optional_string(candidate.get("label")),
+            higher_better=_optional_bool(candidate.get("higher_better")),
+            format=_optional_string(candidate.get("format")) or _optional_string(candidate.get("value_format")),
+            threshold=_optional_finite_float(candidate.get("threshold")),
+            best_key=_optional_string(candidate.get("best_key")),
+        )
+    key = _optional_string(getattr(candidate, "key", None))
+    if not key:
+        return None
+    return MetricColumn(
+        key=key,
+        shortform=_optional_string(getattr(candidate, "shortform", None))
+        or _optional_string(getattr(candidate, "label", None)),
+        higher_better=_optional_bool(getattr(candidate, "higher_better", None)),
+        format=_optional_string(getattr(candidate, "format", None))
+        or _optional_string(getattr(candidate, "value_format", None)),
+        threshold=_optional_finite_float(getattr(candidate, "threshold", None)),
+        best_key=_optional_string(getattr(candidate, "best_key", None)),
+    )
 
 
 def _coerce_metric_info(candidate: MetricDisplayCandidate | MetricInfo | Mapping[str, object]) -> MetricInfo:

@@ -59,6 +59,27 @@ def test_status_schema_v1_1_reader_accepts_v1_0_status_without_attempt():
     assert status.attempt == 1
 
 
+def test_status_schema_accepts_ordered_metric_columns():
+    status = OrchestratorStatus(
+        experiment_id="exp-1",
+        job_id="123",
+        status="running",
+        last_update=100.0,
+        progress={"unit": "epoch", "current": 1, "total": 2, "current_epoch": 1, "total_epochs": 2},
+        metrics={"val/acc": 0.9, "val/loss": 0.2, "debug/extra": 3.0},
+        display={
+            "run_name": "run-1",
+            "metric_columns": [
+                {"key": "val/acc", "shortform": "acc", "higher_better": True},
+                {"key": "val/loss", "shortform": "loss", "higher_better": False},
+            ],
+        },
+    )
+
+    assert status.schema_version == "1.2"
+    assert [column.key for column in status.display.metric_columns] == ["val/acc", "val/loss"]
+
+
 def test_history_entry_json_roundtrip():
     entry = HistoryEntry(
         timestamp=100.0, attempt=2, epoch=3, step=12, unit="step", metrics={"train/loss": 0.5, "val/acc": 0.75}

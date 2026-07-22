@@ -21,6 +21,7 @@ _BASE_PROJECTION_FIELDS = (
     "secondary_metric_value",
     "metric_value",
     "all_metrics",
+    "display_metric_columns",
     "display_metric_info",
 )
 
@@ -59,6 +60,7 @@ def project_status_to_experiment(
     progress = status.progress
     metrics = dict(status.metrics)
     metric_info = {key: info.model_dump(mode="json") for key, info in status.display.metric_info.items()}
+    metric_columns = [column.model_dump(mode="json") for column in status.display.metric_columns]
     links = dict(status.links)
 
     put("status_schema_version", status.schema_version)
@@ -86,6 +88,7 @@ def project_status_to_experiment(
     put(eta_seconds_field, progress.eta_seconds)
 
     put("all_metrics", dict(metrics), skip_none=False)
+    put("display_metric_columns", metric_columns, skip_none=False)
     put("display_metric_info", metric_info, skip_none=False)
 
     primary_metric = status.display.primary_metric

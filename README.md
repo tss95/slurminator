@@ -218,6 +218,25 @@ dashboard:
 
 The CLI flag `--dashboard-ui` overrides this config value for one run.
 
+Dashboard v4 can also persist the main summary-table sort policy in this file:
+
+```yaml
+dashboard:
+  table:
+    sort:
+      metric: primary              # primary | secondary
+      value: current               # current | best
+      direction: auto              # auto | asc | desc
+      preserve_state_groups: true
+      preserve_dataset_groups: false
+```
+
+`direction: auto` uses each metric's `higher_better` metadata. Projects with
+multi-dataset sweeps can set `preserve_dataset_groups: true` to keep dataset
+blocks together before sorting rows within each dataset. The same sort fields
+can be changed for the current dashboard session from `g` -> `Set table sort`;
+edit the YAML file to change the startup default.
+
 Config lookup order:
 
 1. Explicit CLI flags: `--hpc-config-file`, `--orchestrator-config-file`.
@@ -251,7 +270,11 @@ python -m slurminator \
 
 `--yaml` is also the resume path. Launch Slurminator with the same generated
 `experiment_lists/experiments_*.yaml` file to reconnect to queued/running jobs
-and continue submitting pending rows.
+and continue submitting pending rows. Accepted job IDs are fsynced first to a
+small receipt journal under `.orchestrator_status/_submission_receipts/`, then
+compacted into the larger experiment YAML in batches. Keep that sidecar with
+the YAML while a controller may be running or resuming; recovery replays it
+before any new submission.
 
 Generate an experiment list from a custom sweep file:
 

@@ -109,11 +109,13 @@ def handle_cancel_run(cmd: Command, ctx: CommandQueueContext) -> None:
     if hpc_type is None or not job_id:
         return
     scancel_via_connection(ctx.connection_manager, hpc_type, str(job_id))
+    _mark_cancel_requested(exp, job_id=str(job_id))
 
 
 def handle_cancel_all(cmd: Command, ctx: CommandQueueContext) -> None:
     """Cancel active experiments and pause further submissions in the session."""
     ctx.orchestrator.submissions_paused = True
+    requested_at = time.time()
     for exp in ctx.exps:
         if not _status_in(exp.get("status"), {ExperimentStatus.QUEUED, ExperimentStatus.RUNNING}):
             continue
@@ -122,6 +124,7 @@ def handle_cancel_all(cmd: Command, ctx: CommandQueueContext) -> None:
         if hpc_type is None or not job_id:
             continue
         scancel_via_connection(ctx.connection_manager, hpc_type, str(job_id))
+        _mark_cancel_requested(exp, job_id=str(job_id), requested_at=requested_at)
 
 
 def handle_relaunch_run(cmd: Command, ctx: CommandQueueContext) -> None:
@@ -249,6 +252,14 @@ def _is_connected_hpc(orchestrator: Any, hpc_type: HPCType) -> bool:
 def scancel_via_connection(connection_manager: Any, hpc_type: HPCType, job_id: str) -> None:
     """Issue ``scancel`` through the orchestrator connection manager."""
     connection_manager.run_command(hpc_type, f"scancel {job_id}", prefer_remote=True)
+
+
+def _mark_cancel_requested(exp: dict[str, Any], *, job_id: str, requested_at: float | None = None) -> None:
+    """Record that ``scancel`` was dispatched while scheduler confirmation is pending."""
+    timestamp = time.time() if requested_at is None else requested_at
+    exp["cancel_requested_at"] = timestamp
+    exp["cancel_requested_job_id"] = job_id
+    exp["last_change_ts"] = timestamp
 
 
 def _find_experiment(ctx: CommandQueueContext, experiment_id: object) -> dict[str, Any] | None:
@@ -419,6 +430,8 @@ _RELAUNCH_RESET_FIELDS = {
     "completed_timestamp",
     "failed_timestamp",
     "cancelled_timestamp",
+    "cancel_requested_at",
+    "cancel_requested_job_id",
     "timeout_timestamp",
     "killed_timestamp",
     "output_dir",
