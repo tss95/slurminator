@@ -14,9 +14,8 @@ from typing import Any
 from slurminator.base_orchestrator import BaseOrchestrator
 from slurminator.config import HPCType, HPC_CONFIGS, OrchestratorSettings, REPO_ROOT_ENV, load_user_config
 from slurminator.connection_manager import HPCConnectionConfig, HPCConnectionManager
-from slurminator.experiments import CustomSweepConfig, MasterExperimentConfig
-from slurminator.experiments.yaml_utils import load_yaml
-from slurminator.hpc_orchestrator import HPCOrchestrator
+from slurminator.experiments import MasterExperimentConfig
+from slurminator.hpc_orchestrator import HPCOrchestrator, LOW_COMPUTE_POLL_INTERVAL_SECONDS
 from slurminator.launch_guard import get_orchestrator_gpu_hpc_launch_block_message
 from slurminator.logging_config import configure_logging
 from slurminator.plugins import DefaultOrchestratorPlugin, OrchestratorPlugin, SimpleCommandPlugin
@@ -92,6 +91,14 @@ def build_base_parser() -> argparse.ArgumentParser:
         "--lumi-partition", type=str, default=None, help="Compatibility alias for --partition-override LUMI=PARTITION."
     )
     parser.add_argument("--poll-interval", type=int, default=2, help="Polling interval in seconds.")
+    parser.add_argument(
+        "--low-compute",
+        action="store_true",
+        help=(
+            "Reduce controller load: poll at least 60s apart, bound telemetry/submissions, "
+            "checkpoint less often, and slow automatic log reads while keeping the selected dashboard."
+        ),
+    )
     parser.add_argument(
         "--dashboard-ui",
         dest="dashboard_ui",
@@ -175,6 +182,15 @@ def run_orchestrator_cli(
     else:
         _normalise_generic_generation_args(args)
 
+    if args.low_compute:
+        if args.poll_interval <= 0:
+            parser.error("--poll-interval must be positive with --low-compute")
+        if getattr(args, "wandb_sweep", None) is not None:
+            parser.error(
+                "--low-compute requires --yaml or --sweepfile; plugin sweep runners do not support this preset"
+            )
+        args.poll_interval = max(args.poll_interval, LOW_COMPUTE_POLL_INTERVAL_SECONDS)
+
     loaded_config = None
     if load_configs:
         repo_root = args.repo_root or os.environ.get(REPO_ROOT_ENV) or _repo_root_from_plugin(discovered_plugin)
@@ -220,6 +236,7 @@ def run_orchestrator_cli(
 
     if args.dry_run:
         logger.info("Dry run enabled - not launching HPC orchestrator.")
+        print(f"DRY RUN COMPLETE: {Path(experiment_file).resolve()}", flush=True)
         return
 
     if plugin_factory is not None:
@@ -248,6 +265,7 @@ def run_orchestrator_cli(
         plugin=plugin,
         partition_overrides=partition_overrides,
         dashboard_settings=loaded_config.orchestrator.dashboard if loaded_config is not None else None,
+        **({"low_compute": True} if args.low_compute else {}),
     )
     orchestrator.run()
 
@@ -379,11 +397,8 @@ def generate_experiment_yaml_from_flags(args: argparse.Namespace, *, orchestrato
     if not getattr(args, "custom_sweep_file", None):
         raise ValueError("--sweepfile requires a YAML spec path.")
 
-    master_config = MasterExperimentConfig(
-        run_custom_sweeps=True,
-        custom_sweeps=_load_custom_sweeps(args.custom_sweep_file),
-        num_epochs=args.num_epochs,
-        config_profile=args.config_profile,
+    master_config = MasterExperimentConfig.from_sweep_yaml(
+        args.custom_sweep_file, num_epochs=args.num_epochs, config_profile=args.config_profile
     )
     generator = orchestrator_cls(master_config)
     generator.generate_all_experiments()
@@ -417,17 +432,6 @@ def _resolve_experiment_file(
         return str(generated)
 
     raise SystemExit("No action specified. Provide --yaml or --sweepfile.")
-
-
-def _load_custom_sweeps(path: str) -> list[CustomSweepConfig]:
-    """Load generic custom-sweep specs from YAML."""
-    data = load_yaml(path)
-    sweeps_raw = data.get("custom_sweeps", data)
-    if isinstance(sweeps_raw, dict):
-        sweeps_raw = sweeps_raw.get("custom_sweeps", [])
-    if not isinstance(sweeps_raw, list):
-        raise ValueError("custom_sweeps must be a list in the provided YAML file.")
-    return [CustomSweepConfig(**entry) for entry in sweeps_raw]
 
 
 def _default_plugin_from_args(

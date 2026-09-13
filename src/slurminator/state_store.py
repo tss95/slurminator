@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +12,8 @@ from slurminator.config import HPCType
 from slurminator.experiments import ExperimentStatus
 from slurminator.experiments.yaml_utils import dump_yaml, load_yaml
 from slurminator.hpc_state import is_terminal_status
+from slurminator.lifecycle_journal import SchedulerLifecycleJournal, SchedulerLifecycleTransition
+from slurminator.scheduler_polling import SchedulerTransition
 from slurminator.submission_journal import SubmissionReceipt, SubmissionReceiptJournal
 
 logger = logging.getLogger("slurminator")
@@ -24,15 +26,20 @@ class ExperimentStateStore:
         self.experiment_file = Path(experiment_file)
         self.concurrency_limits = concurrency_limits or {}
         self.submission_journal = SubmissionReceiptJournal(self.experiment_file)
+        self.lifecycle_journal = SchedulerLifecycleJournal(self.experiment_file)
         self._warned_unpolled_hpcs: set[object] = set()
+        self._reported_replayed_journals: set[Path] = set()
 
     def load(self) -> dict[str, Any]:
         """Load experiment YAML and ensure a dict with an ``experiments`` list."""
         if not self.experiment_file.exists():
-            if self.submission_journal.path.exists():
+            remaining_journals = [
+                journal.path for journal in (self.submission_journal, self.lifecycle_journal) if journal.path.exists()
+            ]
+            if remaining_journals:
                 raise FileNotFoundError(
-                    f"Experiment ledger {self.experiment_file} is missing while durable submission receipts remain "
-                    f"at {self.submission_journal.path}"
+                    f"Experiment ledger {self.experiment_file} is missing while durable journal state remains at "
+                    f"{', '.join(str(path) for path in remaining_journals)}"
                 )
             logger.error("File not found: %s", self.experiment_file)
             return {"experiments": []}
@@ -49,33 +56,70 @@ class ExperimentStateStore:
             data["experiments"] = []
 
         self._coerce_experiment_rows(data["experiments"])
+        superseded_jobs = self._superseded_submission_jobs()
         replayed_receipts = self.submission_journal.apply(data)
+        replayed_transitions = self.lifecycle_journal.apply(data, superseded_jobs=superseded_jobs)
         self._warn_about_zero_limit_active_rows(data["experiments"])
-        if replayed_receipts:
-            self.save(data)
+        if replayed_receipts and self.submission_journal.path not in self._reported_replayed_journals:
             logger.warning(
-                "Recovered %d accepted submission(s) from %s.", replayed_receipts, self.submission_journal.path
+                "Replayed %d accepted submission(s) from %s in memory; they will be compacted at the next "
+                "explicit checkpoint.",
+                replayed_receipts,
+                self.submission_journal.path,
             )
+            self._reported_replayed_journals.add(self.submission_journal.path)
+        if replayed_transitions and self.lifecycle_journal.path not in self._reported_replayed_journals:
+            logger.warning(
+                "Replayed %d scheduler lifecycle transition(s) from %s in memory; they will be compacted at the "
+                "next explicit checkpoint.",
+                replayed_transitions,
+                self.lifecycle_journal.path,
+            )
+            self._reported_replayed_journals.add(self.lifecycle_journal.path)
         return data
 
     def save(self, data: Mapping[str, Any]) -> None:
-        """Merge submission receipts, then persist and checkpoint the ledger."""
+        """Merge durable journals, then persist and checkpoint the ledger."""
         checkpoint = dict(data)
-        journal_exists = self.submission_journal.path.exists()
+        submission_journal_exists = self.submission_journal.path.exists()
+        lifecycle_journal_exists = self.lifecycle_journal.path.exists()
+        superseded_jobs = self._superseded_submission_jobs()
         self.submission_journal.apply(checkpoint)
+        self.lifecycle_journal.apply(checkpoint, superseded_jobs=superseded_jobs)
         dump_yaml(checkpoint, str(self.experiment_file))
-        if journal_exists:
+        if submission_journal_exists or lifecycle_journal_exists:
             # ``dump_yaml`` atomically replaces the file. Make both its data
             # and directory entry durable before deleting the only compact
-            # record of accepted submissions.
+            # record of accepted submissions and scheduler transitions.
             _fsync_file(self.experiment_file)
             _fsync_directory(self.experiment_file.parent)
-            self.submission_journal.clear()
+            if lifecycle_journal_exists:
+                self.lifecycle_journal.clear()
+                self._reported_replayed_journals.discard(self.lifecycle_journal.path)
+            if submission_journal_exists:
+                # Clear retry provenance last so interrupted cleanup retains
+                # the old-to-new job identity needed for strict replay.
+                self.submission_journal.clear()
+                self._reported_replayed_journals.discard(self.submission_journal.path)
         logger.debug("Saved updated YAML => %s", self.experiment_file)
 
     def record_submission(self, experiment: Mapping[str, Any], previous_job_id: str | None = None) -> SubmissionReceipt:
         """Durably record one accepted submission without rewriting the full ledger."""
         return self.submission_journal.append_experiment(experiment, previous_job_id)
+
+    def record_scheduler_transitions(
+        self, transitions: Iterable[SchedulerTransition]
+    ) -> list[SchedulerLifecycleTransition]:
+        """Durably record one scheduler poll's lifecycle changes with one fsync."""
+        return self.lifecycle_journal.append_transitions(transitions)
+
+    def _superseded_submission_jobs(self) -> set[tuple[str, str]]:
+        """Return old job identities explicitly replaced by durable receipts."""
+        return {
+            (receipt.experiment_id, receipt.previous_job_id)
+            for receipt in self.submission_journal.read()
+            if receipt.previous_job_id is not None
+        }
 
     def _load_backup_after_parse_error(self, exc: Exception) -> dict[str, Any]:
         """Try to recover from a truncated/corrupted YAML file via its ``.bak``."""

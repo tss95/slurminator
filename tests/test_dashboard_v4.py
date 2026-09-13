@@ -9,11 +9,14 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, call
 
 import pytest
 from rich.text import Text
 from textual import events
 from textual.css.query import NoMatches
+from textual.containers import VerticalScroll
 from textual.widgets import Button, Input, Label, ListView, RichLog, Static
 
 import slurminator.hpc_orchestrator as hpc_orchestrator_module
@@ -27,6 +30,7 @@ from slurminator.dashboard_v4.app import (
 )
 from slurminator.dashboard_v4.commands import submit_command
 from slurminator.dashboard_v4.detail_screen import PerRunDetailScreen
+from slurminator.dashboard_v4.experiment_info_screen import ExperimentInfoScreen
 from slurminator.dashboard_v4.forms.concurrency_form import ConcurrencyFormScreen
 from slurminator.dashboard_v4.forms.global_settings_form import GlobalSettingsFormScreen
 from slurminator.dashboard_v4.forms.relaunch_form import RelaunchFormScreen
@@ -48,6 +52,7 @@ from slurminator.dashboard_v4.widgets import experiments_table as experiments_ta
 from slurminator.dashboard_v4.widgets.sparkline import render_sparkline, slope_color
 from slurminator.dashboard_v4.widgets import ExperimentsTable
 from slurminator.experiments import ExperimentStatus
+from slurminator.experiments.yaml_utils import dump_yaml
 from slurminator.ui_dashboard import TerminalDashboard
 from slurminator.hpc_orchestrator import HPCOrchestrator
 from slurminator.schemas.status_schema import HistoryEntry
@@ -267,13 +272,203 @@ def test_textual_home_table_renders_and_cursor_moves(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_textual_home_table_preserves_scroll_across_snapshot_rebuild(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        experiments = []
+        for index in range(80):
+            exp = dict(_experiments()[0])
+            exp.update({"experiment_id": f"exp-{index:03d}", "current_epoch": index, "max_epochs": 100})
+            experiments.append(exp)
+        orch._publish_dashboard_snapshot(experiments)
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(70, 14)) as pilot:
+            await pilot.pause(0.2)
+            table = app.screen.query_one(ExperimentsTable)
+            table.move_cursor(row=50, animate=False)
+            table.scroll_to(x=10, y=30, animate=False, force=True, immediate=True)
+            await pilot.pause(0.05)
+            previous_scroll = (
+                int(table.scroll_x),
+                int(table.scroll_y),
+                int(table.scroll_target_x),
+                int(table.scroll_target_y),
+            )
+            assert previous_scroll == (10, 30, 10, 30)
+
+            refreshed = [dict(exp) for exp in experiments]
+            refreshed[0]["current_epoch"] = 81
+            orch._publish_dashboard_snapshot(refreshed)
+            app.screen.refresh_from_orchestrator()
+            refreshed[1]["current_epoch"] = 82
+            orch._publish_dashboard_snapshot(refreshed)
+            app.screen.refresh_from_orchestrator()
+            await pilot.pause(0.2)
+
+            assert table.cursor_row == 50
+            assert table.get_row_at(table.cursor_row)[0] == "exp-050"
+            assert (
+                int(table.scroll_x),
+                int(table.scroll_y),
+                int(table.scroll_target_x),
+                int(table.scroll_target_y),
+            ) == previous_scroll
+
+    asyncio.run(run())
+
+
+def test_textual_home_table_clamps_scroll_when_row_count_shrinks(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        experiments = []
+        for index in range(80):
+            exp = dict(_experiments()[0])
+            exp["experiment_id"] = f"exp-{index:03d}"
+            experiments.append(exp)
+        orch._publish_dashboard_snapshot(experiments)
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(70, 14)) as pilot:
+            await pilot.pause(0.2)
+            table = app.screen.query_one(ExperimentsTable)
+            table.move_cursor(row=5, animate=False)
+            table.scroll_to(y=60, animate=False, force=True, immediate=True)
+            await pilot.pause(0.05)
+            assert int(table.scroll_target_y) == 60
+
+            orch._publish_dashboard_snapshot(experiments[:10])
+            app.screen.refresh_from_orchestrator()
+            await pilot.pause(0.2)
+
+            assert table.get_row_at(table.cursor_row)[0] == "exp-005"
+            assert int(table.max_scroll_y) < 60
+            clamped_scroll_y = int(table.max_scroll_y)
+            assert int(table.scroll_y) == clamped_scroll_y
+            assert int(table.scroll_target_y) == clamped_scroll_y
+
+            orch._publish_dashboard_snapshot(experiments)
+            app.screen.refresh_from_orchestrator()
+            await pilot.pause(0.2)
+
+            assert int(table.scroll_y) == clamped_scroll_y
+            assert int(table.scroll_target_y) == clamped_scroll_y
+
+    asyncio.run(run())
+
+
 def test_textual_app_title_is_slurminator() -> None:
     app = TextualDashboardApp(refresh_interval=0.05)
 
     assert app.title == "Slurminator"
 
 
-def test_textual_home_renders_summary_progress_and_footer(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("info", "expected_title"),
+    [
+        ({}, "Slurminator"),
+        ({"experiment_name": None, "experiment_description": None}, "Slurminator"),
+        ({"experiment_name": " \t\n "}, "Slurminator"),
+        ({"experiment_description": "Compare encoders on HAR."}, "Slurminator"),
+        ({"experiment_name": "  HAR\n encoder comparison  "}, "Slurminator - HAR encoder comparison"),
+        ({"experiment_name": "[baseline] α comparison"}, "Slurminator - [baseline] α comparison"),
+    ],
+)
+def test_textual_app_title_uses_experiment_ledger_info(tmp_path: Path, info: dict, expected_title: str) -> None:
+    orch = _orchestrator(tmp_path)
+    dump_yaml({"metadata": info, "experiments": []}, orch.experiment_file)
+    orch._load_yaml()
+    app = TextualDashboardApp()
+
+    app._attach_orchestrator(orch)
+    assert app.title == expected_title
+
+    app._attach_orchestrator(orch)
+    assert app.title == expected_title
+    app._attach_orchestrator(SimpleNamespace())
+    assert app.title == "Slurminator"
+
+
+@pytest.mark.parametrize("field_name", ["experiment_name", "experiment_description"])
+def test_experiment_ledger_rejects_non_text_info(tmp_path: Path, field_name: str) -> None:
+    orch = _orchestrator(tmp_path)
+    dump_yaml({"metadata": {field_name: ["invalid"]}, "experiments": []}, orch.experiment_file)
+
+    with pytest.raises(ValueError, match=f"{field_name} must be a string or null"):
+        orch._load_yaml()
+
+
+@pytest.mark.parametrize("size", [(120, 32), (60, 14)])
+def test_textual_global_menu_shows_scrollable_experiment_info(tmp_path: Path, size: tuple[int, int]) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        name = "[baseline] α encoder comparison"
+        description = "Compare [bold]encoders[/bold] on HAR.\n\n" + "Dataset context.\n" * 60 + "Final detail."
+        dump_yaml(
+            {"metadata": {"experiment_name": name, "experiment_description": description}, "experiments": []},
+            orch.experiment_file,
+        )
+        orch._load_yaml()
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            assert app.title == f"Slurminator - {name}"
+            await pilot.press("g")
+            actions = app.screen.query_one("#global-actions", ListView)
+            actions.index = next(i for i, item in enumerate(actions.children) if item.id == "show-exp-info")
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert isinstance(app.screen, ExperimentInfoScreen)
+            assert name in str(app.screen.query_one("#experiment-info-title", Label).render())
+            description_widget = app.screen.query_one("#experiment-info-description", Static)
+            assert description in str(description_widget.render())
+            scroll = app.screen.query_one("#experiment-info-scroll", VerticalScroll)
+            assert scroll.max_scroll_y > 0
+            await pilot.press("end")
+            await pilot.pause()
+            assert scroll.scroll_target_y > 0
+            await pilot.click("#close-experiment-info")
+            assert isinstance(app.screen, GlobalMenuScreen)
+            await pilot.press("enter")
+            assert isinstance(app.screen, ExperimentInfoScreen)
+            await pilot.press("escape")
+            assert isinstance(app.screen, GlobalMenuScreen)
+            assert _pending_commands(tmp_path) == []
+
+    asyncio.run(run())
+
+
+def test_textual_experiment_info_handles_missing_description(tmp_path: Path) -> None:
+    async def run() -> None:
+        orch = _orchestrator(tmp_path)
+        app = TextualDashboardApp(refresh_interval=0.05)
+        app.orchestrator = orch
+
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.push_screen(ExperimentInfoScreen())
+            await pilot.pause()
+            assert "Experiment info" in str(app.screen.query_one("#experiment-info-title", Label).render())
+            assert "No experiment description provided." in str(
+                app.screen.query_one("#experiment-info-description", Static).render()
+            )
+            await pilot.press("escape")
+            assert isinstance(app.screen, HomeScreen)
+
+    asyncio.run(run())
+
+
+def test_textual_home_renders_summary_progress_and_footer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Keep footer expectations independent of the developer's cluster profile.
+    monkeypatch.setattr(
+        "slurminator.dashboard_v4.home_screen.HPC_CONFIGS",
+        {HPCType.OLIVIA: SimpleNamespace(gpu_count=1, base_time_hours=2, mem_per_gpu_gb=None, base_memory_gb=None)},
+    )
+
     async def run() -> None:
         orch = _orchestrator(tmp_path)
         experiments = _experiments()
@@ -320,6 +515,43 @@ def test_textual_home_renders_summary_progress_and_footer(tmp_path: Path) -> Non
             assert _has_styled_span(footer_text, "GPU quota:", "yellow")
 
     asyncio.run(run())
+
+
+def test_low_compute_retains_textual_dashboard(tmp_path: Path) -> None:
+    orchestrator = HPCOrchestrator(
+        str(tmp_path / "experiments.yaml"),
+        concurrency_limits={},
+        connection_manager=FakeConnection(),
+        local_log_dir=str(tmp_path / "logs"),
+        low_compute=True,
+    )
+
+    assert orchestrator.dashboard_ui == "v4"
+    assert orchestrator._resolve_dashboard_cls() is TextualDashboardApp
+    app = TextualDashboardApp(headless=True)
+    app.orchestrator = orchestrator
+    orchestrator._render_dashboard_snapshot(app, [], live=app)
+    assert app.refresh_interval == 1.0
+    assert app.dashboard_snapshot_version() == orchestrator._dashboard_snapshot_version
+
+
+def test_textual_home_skips_unchanged_snapshot_without_io(monkeypatch) -> None:
+    app = SimpleNamespace(dashboard_snapshot_version=Mock(return_value=1), get_dashboard_snapshot=Mock(return_value=[]))
+    monkeypatch.setattr(HomeScreen, "app", property(lambda _self: app))
+    screen = HomeScreen()
+    monkeypatch.setattr(screen, "query_one", Mock())
+    footer = Mock(return_value=Text("cached quota"))
+    monkeypatch.setattr(screen, "_footer_text", footer)
+
+    screen.refresh_from_orchestrator()
+    for _ in range(10):
+        screen.refresh_from_orchestrator()
+
+    app.get_dashboard_snapshot.assert_called_once()
+    footer.assert_called_once()
+    app.dashboard_snapshot_version.return_value = 2
+    screen.refresh_from_orchestrator()
+    assert app.get_dashboard_snapshot.call_count == 2
 
 
 def test_textual_home_renders_prepublished_initial_snapshot(tmp_path: Path) -> None:
@@ -849,6 +1081,7 @@ def test_textual_global_menu_concurrency_form_writes_limit_commands(tmp_path: Pa
                 "set-global-settings",
                 "set-table-sort",
                 "cancel-all",
+                "show-exp-info",
                 "help",
                 "close-global-menu",
             ]
@@ -1076,13 +1309,14 @@ def test_textual_help_opens_from_question_mark_and_global_menu(tmp_path: Path) -
             await pilot.press("g")
             await pilot.pause(0.1)
             global_actions = app.screen.query_one("#global-actions")
-            global_actions.index = 5
+            global_actions.index = 6
             await pilot.press("enter")
             await pilot.pause(0.1)
             assert isinstance(app.screen, HelpScreen)
             assert "Set concurrency limits" in str(app.screen.query_one("#help-content").render())
             assert "Set Slurm overrides" in str(app.screen.query_one("#help-content").render())
             assert "Set table sort" in str(app.screen.query_one("#help-content").render())
+            assert "Show exp info" in str(app.screen.query_one("#help-content").render())
 
     asyncio.run(run())
 
@@ -1685,6 +1919,33 @@ def test_textual_detail_screen_empty_state_and_force_history_read(tmp_path: Path
             assert "No data yet" in detail_text
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("low_compute", "poll_interval", "ui_interval", "expected_interval"),
+    [(False, 60, 1.0, 1.0), (True, 60, 1.0, 60), (True, 120, 1.0, 120), (True, 60, 300.0, 300.0)],
+)
+def test_textual_log_refresh_uses_io_cadence_in_low_compute(
+    monkeypatch, low_compute: bool, poll_interval: int, ui_interval: float, expected_interval: float
+) -> None:
+    app = SimpleNamespace(
+        refresh_interval=ui_interval, orchestrator=SimpleNamespace(low_compute=low_compute, poll_interval=poll_interval)
+    )
+    monkeypatch.setattr(PerRunLogScreen, "app", property(lambda _self: app))
+    screen = PerRunLogScreen(_experiments()[0])
+    refresh = Mock()
+    timer = Mock()
+    monkeypatch.setattr(screen, "refresh_log", refresh)
+    monkeypatch.setattr(screen, "set_interval", timer)
+    monkeypatch.setattr(screen, "query_one", Mock())
+    monkeypatch.setattr(screen, "_update_selection_help", Mock())
+
+    screen.on_mount()
+
+    timer.assert_called_once_with(expected_interval, refresh)
+    refresh.assert_called_once_with(force=True)
+    screen.action_refresh()
+    assert refresh.call_args_list == [call(force=True), call(force=True)]
 
 
 def test_textual_log_screen_tails_and_appends_new_lines(tmp_path: Path) -> None:

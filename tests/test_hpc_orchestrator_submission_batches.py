@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Iterator
 
 import pytest
@@ -208,9 +209,10 @@ class _FakeDashboard:
 
 @pytest.mark.parametrize("debug", [True, False])
 def test_run_polls_between_submission_batches_and_does_not_render_per_job(
-    debug: bool, monkeypatch: pytest.MonkeyPatch
+    debug: bool, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     orchestrator = _bare_orchestrator(batch_size=2)
+    orchestrator.experiment_file = tmp_path / "experiments.yaml"
     experiments = [{"experiment_id": f"exp-{index}"} for index in range(3)]
     data: dict[str, Any] = {"experiments": experiments}
     events: list[str] = []
@@ -228,15 +230,15 @@ def test_run_polls_between_submission_batches_and_does_not_render_per_job(
     monkeypatch.setattr(orchestrator, "_load_yaml", lambda: data)
     monkeypatch.setattr(orchestrator, "_preflight_validate_experiments", lambda _data: 0)
     monkeypatch.setattr(orchestrator, "_preflight_test_hpcs", lambda: None)
-    monkeypatch.setattr(orchestrator, "_recover_orphans", lambda: None)
-    monkeypatch.setattr(orchestrator, "_catch_up_existing_state", lambda: None)
+    monkeypatch.setattr(orchestrator, "_recover_orphans", lambda startup_data: startup_data)
+    monkeypatch.setattr(orchestrator, "_catch_up_existing_state", lambda _startup_data: None)
     monkeypatch.setattr(orchestrator, "_process_command_queue", lambda _exps: 0)
     monkeypatch.setattr(orchestrator, "_update_statuses", lambda _exps: events.append("poll"))
     monkeypatch.setattr(orchestrator, "_refresh_scheduler_statuses", lambda _exps: events.append("poll"))
     monkeypatch.setattr(orchestrator, "_update_queue_estimates", lambda _exps: None)
     monkeypatch.setattr(orchestrator, "_save_yaml", lambda _data: events.append("save"))
     monkeypatch.setattr(orchestrator, "_publish_dashboard_snapshot", lambda _exps: None)
-    monkeypatch.setattr(orchestrator, "_publish_current_dashboard_snapshot", lambda: experiments)
+    monkeypatch.setattr(orchestrator, "_publish_current_dashboard_snapshot", lambda _data=None: experiments)
     monkeypatch.setattr(orchestrator, "_count_concurrency", lambda _exps: {})
     monkeypatch.setattr(orchestrator, "_maybe_reassign_experiments", lambda *_args: None)
     monkeypatch.setattr(orchestrator, "_resolve_dashboard_cls", lambda: _FakeDashboard)

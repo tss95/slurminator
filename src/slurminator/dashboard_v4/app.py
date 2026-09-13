@@ -24,6 +24,7 @@ from slurminator.dashboard_v4.clipboard import (
 )
 from slurminator.dashboard_v4.home_screen import HomeScreen
 from slurminator.dashboard_v4.widgets import SparklineThresholds
+from slurminator.experiments.experiment_info import ExperimentInfo
 
 logger = logging.getLogger("slurminator")
 CONSOLE_LOG_LEVEL_WHILE_ACTIVE = logging.WARNING
@@ -105,7 +106,7 @@ class TextualDashboardApp(App[None]):
     #global-menu {
         width: 52;
         height: auto;
-        max-height: 16;
+        max-height: 18;
         border: solid $accent;
         background: $surface;
         padding: 1 2;
@@ -352,6 +353,7 @@ class TextualDashboardApp(App[None]):
     ) -> None:
         app_title = str(kwargs.pop("title", "Slurminator"))
         super().__init__(**kwargs)
+        self._base_title = app_title
         self.title = app_title
         if LinuxDriver is not None and self.driver_class is LinuxDriver:
             self.driver_class = ThreadFriendlyLinuxDriver
@@ -373,6 +375,7 @@ class TextualDashboardApp(App[None]):
 
     def on_mount(self) -> None:
         """Install the home screen when Textual starts."""
+        self._update_experiment_title()
         self.push_screen(HomeScreen())
         self.set_interval(2.0, self._poll_terminal_size)
 
@@ -463,6 +466,14 @@ class TextualDashboardApp(App[None]):
                 return experiment_id
         return None
 
+    def get_experiment_info(self) -> ExperimentInfo:
+        """Return cached list-wide context without reading the ledger from the UI."""
+        return getattr(self.orchestrator, "experiment_info", ExperimentInfo())
+
+    def _update_experiment_title(self) -> None:
+        name = self.get_experiment_info().name
+        self.title = f"{self._base_title} - {name}" if name else self._base_title
+
     def request_dashboard_exit(self) -> None:
         """Request graceful shutdown of both Textual and the orchestrator loop."""
         self.dashboard_exit_requested = True
@@ -497,6 +508,7 @@ class TextualDashboardApp(App[None]):
 
     def _attach_orchestrator(self, orchestrator: Any) -> None:
         self.orchestrator = orchestrator
+        self._update_experiment_title()
         if not hasattr(orchestrator, "_dashboard_snapshot"):
             orchestrator._dashboard_snapshot = []
 

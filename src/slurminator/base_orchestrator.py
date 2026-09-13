@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from slurminator.experiments import ExperimentConfig, ExperimentStatus
+from slurminator.experiments.experiment_info import ExperimentInfo
 from slurminator.experiments.yaml_utils import dump_yaml
 from slurminator.git_provenance import capture_provenance
 
@@ -32,6 +33,7 @@ class BaseOrchestrator:
         self.output_dir = Path("experiment_lists")
         self.output_dir.mkdir(exist_ok=True)
         self.project_names: dict[str, str] = {}
+        self.skipped_duplicate_templates: list[str] = []
 
     def _seeded(
         self,
@@ -253,6 +255,7 @@ class BaseOrchestrator:
     def generate_all_experiments(self) -> None:
         """Generate experiments from the master config."""
         self.experiments = []
+        self.skipped_duplicate_templates = []
         existing_results = self._load_existing_results()
         self.project_names = {}
 
@@ -260,6 +263,12 @@ class BaseOrchestrator:
             self._generate_custom_sweep_experiments(existing_results)
 
         logger.info("Generated %s total experiments", len(self.experiments))
+        if self.skipped_duplicate_templates:
+            logger.warning(
+                "Skipped %s custom-sweep template(s) as duplicates: %s",
+                len(self.skipped_duplicate_templates),
+                ", ".join(self.skipped_duplicate_templates),
+            )
         skipped_count = sum(1 for exp in self.experiments if exp.status == ExperimentStatus.COMPLETED)
         if skipped_count > 0:
             logger.info("Skipped %s already completed experiments", skipped_count)
@@ -276,6 +285,10 @@ class BaseOrchestrator:
                 "experiment_count": len(self.experiments),
                 "project_git_sha": provenance["project"],
                 "slurminator_git_sha": provenance["slurminator"],
+                **ExperimentInfo(
+                    name=getattr(self.master_config, "experiment_name", None),
+                    description=getattr(self.master_config, "experiment_description", None),
+                ).to_metadata(),
             },
             "experiments": [],
         }
@@ -316,6 +329,7 @@ class BaseOrchestrator:
     def _generate_custom_sweep_experiments(self, existing_results: dict[str, dict]) -> None:
         """Generate experiments from arbitrary sweep specifications."""
         sweeps = getattr(self.master_config, "custom_sweeps", []) or []
+        generated_ids = {exp.experiment_id for exp in self.experiments}
         for sweep_cfg in sweeps:
             sweep_profile = getattr(sweep_cfg, "config_profile", None)
             master_profile = getattr(self.master_config, "config_profile", None)
@@ -431,11 +445,14 @@ class BaseOrchestrator:
             task_type = self._resolve_task_type(getattr(sweep_cfg, "task_type", None))
             exp_prefix = getattr(sweep_cfg, "experiment_prefix", "abl")
             tag_prefix_map = getattr(sweep_cfg, "parameters_prefix", {}) or {}
+            seeds_override = getattr(sweep_cfg, "seeds", None)
+            num_seeds = getattr(sweep_cfg, "num_seeds", None)
 
             for dataset_name in datasets:
                 project = getattr(sweep_cfg, "wandb_project", None) or self._get_project_name(
                     f"CustomSweep_{self._sanitize_id_component(dataset_name)}"
                 )
+                seeds = self._resolve_seeds(dataset_name, seeds_override, num_seeds)
 
                 for case in cases:
                     case_tag = self._sanitize_id_component(getattr(case, "name", "case"))
@@ -444,8 +461,11 @@ class BaseOrchestrator:
                     overrides.update(_canonicalize_overrides(getattr(case, "overrides", {}) or {}))
 
                     exp_id = f"{exp_prefix}_{self._sanitize_id_component(dataset_name)}_{case_tag}"
-                    if exp_id in existing_results or any(e.experiment_id.startswith(exp_id) for e in self.experiments):
-                        logger.debug("Skipping duplicate custom sweep experiment %s", exp_id)
+                    duplicate_reason = self._custom_sweep_duplicate_reason(
+                        exp_id, seeds=seeds, existing_results=existing_results, generated_ids=generated_ids
+                    )
+                    if duplicate_reason is not None:
+                        self._skip_duplicate_custom_sweep(exp_id, duplicate_reason)
                         continue
 
                     run_name = self._custom_sweep_run_name(sweep_cfg, dataset_name=dataset_name, tag=case_tag)
@@ -475,14 +495,9 @@ class BaseOrchestrator:
                         sweep_params=self._build_override_str(**overrides),
                         extra_command=None,
                     )
-                    self.experiments.extend(
-                        self._seeded(
-                            template,
-                            dataset_name,
-                            seeds_override=getattr(sweep_cfg, "seeds", None),
-                            num_seeds=getattr(sweep_cfg, "num_seeds", None),
-                        )
-                    )
+                    runs = self._seeded(template, dataset_name, seeds_override=seeds_override, num_seeds=num_seeds)
+                    self.experiments.extend(runs)
+                    generated_ids.update(run.experiment_id for run in runs)
 
                 if run_cartesian:
                     for values in combos:
@@ -495,10 +510,11 @@ class BaseOrchestrator:
 
                         tag_str = "_".join(tags) if tags else "base"
                         exp_id = f"{exp_prefix}_{self._sanitize_id_component(dataset_name)}_{tag_str}"
-                        if exp_id in existing_results or any(
-                            e.experiment_id.startswith(exp_id) for e in self.experiments
-                        ):
-                            logger.debug("Skipping duplicate custom sweep experiment %s", exp_id)
+                        duplicate_reason = self._custom_sweep_duplicate_reason(
+                            exp_id, seeds=seeds, existing_results=existing_results, generated_ids=generated_ids
+                        )
+                        if duplicate_reason is not None:
+                            self._skip_duplicate_custom_sweep(exp_id, duplicate_reason)
                             continue
 
                         run_name = self._custom_sweep_run_name(sweep_cfg, dataset_name=dataset_name, tag=tag_str)
@@ -528,14 +544,35 @@ class BaseOrchestrator:
                             sweep_params=self._build_override_str(**overrides),
                             extra_command=None,
                         )
-                        self.experiments.extend(
-                            self._seeded(
-                                template,
-                                dataset_name,
-                                seeds_override=getattr(sweep_cfg, "seeds", None),
-                                num_seeds=getattr(sweep_cfg, "num_seeds", None),
-                            )
-                        )
+                        runs = self._seeded(template, dataset_name, seeds_override=seeds_override, num_seeds=num_seeds)
+                        self.experiments.extend(runs)
+                        generated_ids.update(run.experiment_id for run in runs)
+
+    def _custom_sweep_duplicate_reason(
+        self, exp_id: str, *, seeds: list[int], existing_results: dict[str, dict], generated_ids: set[str]
+    ) -> str | None:
+        """Return why a custom-sweep template would duplicate an existing experiment, or ``None``.
+
+        Only exact experiment-id matches count: the template id itself or one of
+        the seeded ids ``{exp_id}_s{seed}`` it expands to. A bare string-prefix
+        match is not a duplicate: ``..._b7`` is a prefix of ``..._b70_s42`` but
+        names a different experiment (prefix matching silently dropped such
+        cases from generated lists).
+        """
+        if exp_id in existing_results:
+            return "already present in existing results"
+        if exp_id in generated_ids:
+            return "experiment id already generated in this list"
+        for seed in seeds:
+            seeded_id = f"{exp_id}_s{seed}"
+            if seeded_id in generated_ids:
+                return f"seeded experiment id {seeded_id} already generated in this list"
+        return None
+
+    def _skip_duplicate_custom_sweep(self, exp_id: str, reason: str) -> None:
+        """Record and loudly log a skipped custom-sweep template."""
+        self.skipped_duplicate_templates.append(exp_id)
+        logger.warning("[CustomSweep] Skipping %s: %s", exp_id, reason)
 
     def _custom_sweep_run_name(self, sweep_cfg: object, *, dataset_name: str, tag: str) -> str:
         run_name_prefix = getattr(sweep_cfg, "run_name_prefix", None) or getattr(sweep_cfg, "experiment_prefix", "abl")

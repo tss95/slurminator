@@ -46,6 +46,7 @@ Set concurrency limits
 Set Slurm overrides for pending runs
 Set table sort
 Cancel active jobs
+Show exp info: experiment title and description
 
 Per-run menu
 View plots, details, and logs

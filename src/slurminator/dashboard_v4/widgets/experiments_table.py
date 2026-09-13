@@ -30,6 +30,8 @@ class ExperimentsTable(DataTable):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._row_experiments: list[dict[str, Any]] = []
+        self._pending_viewport_restore: tuple[float, float] | None = None
+        self._viewport_restore_generation = 0
 
     def on_mount(self) -> None:
         """Initialize stable table columns."""
@@ -46,7 +48,12 @@ class ExperimentsTable(DataTable):
         sparkline_thresholds: SparklineThresholds | object | None = None,
         table_sort: object | None = None,
     ) -> None:
-        """Replace table rows with the latest experiment snapshot."""
+        """Replace table rows while preserving the selection and viewport."""
+        # Keep the original target if another rebuild arrives before the deferred restore.
+        if self._pending_viewport_restore is None:
+            self._pending_viewport_restore = (float(self.scroll_target_x), float(self.scroll_target_y))
+        self._viewport_restore_generation += 1
+        restore_generation = self._viewport_restore_generation
         previous_key = None
         if self._row_experiments and 0 <= self.cursor_row < len(self._row_experiments):
             previous_key = _row_key(self._row_experiments[self.cursor_row], self.cursor_row)
@@ -83,7 +90,8 @@ class ExperimentsTable(DataTable):
             cells.append(_format_queue_delta(exp))
             self.add_row(*cells, key=str(exp.get("experiment_id", len(self.rows))))
         if rows:
-            self.move_cursor(row=cursor_row, column=0, animate=False)
+            self.move_cursor(row=cursor_row, column=0, animate=False, scroll=False)
+        self.call_after_refresh(self._restore_viewport, restore_generation)
 
     def selected_experiment(self, experiments: list[dict[str, Any]]) -> dict[str, Any] | None:
         """Return the row under the table cursor."""
@@ -104,6 +112,16 @@ class ExperimentsTable(DataTable):
             columns.append(_trajectory_column_label(secondary_label))
         columns.append("Queue/DT")
         self.add_columns(*columns)
+
+    def _restore_viewport(self, generation: int) -> None:
+        """Restore scroll after Textual has recomputed the table dimensions."""
+        if generation != self._viewport_restore_generation or self._pending_viewport_restore is None:
+            return
+        scroll_x, scroll_y = self._pending_viewport_restore
+        scroll_x = min(max(scroll_x, 0.0), float(self.max_scroll_x))
+        scroll_y = min(max(scroll_y, 0.0), float(self.max_scroll_y))
+        self.scroll_to(x=scroll_x, y=scroll_y, animate=False, force=True)
+        self._pending_viewport_restore = None
 
 
 def table_render_signature(
@@ -390,10 +408,7 @@ def _sort_metric_name(exp: dict[str, Any], metric_selector: str) -> str:
 
 
 def _sort_metric_value(
-    exp: dict[str, Any],
-    metric_name: str,
-    metric_info: dict[str, Any] | None,
-    sort_settings: dict[str, Any],
+    exp: dict[str, Any], metric_name: str, metric_info: dict[str, Any] | None, sort_settings: dict[str, Any]
 ) -> float | None:
     if sort_settings["value"] == "best":
         best = _lookup_best_metric_value(exp, metric_name, metric_info)

@@ -16,6 +16,8 @@ from slurminator.status_projection import project_status_to_experiment, status_p
 
 logger = logging.getLogger("slurminator")
 HISTORY_TERMINAL_BOUND = 100
+TERMINAL_TELEMETRY_MAX_ATTEMPTS = 3
+TERMINAL_TELEMETRY_STATE_FIELD = "terminal_telemetry"
 
 LoadYaml = Callable[[], dict[str, Any]]
 SaveYaml = Callable[[dict[str, Any]], None]
@@ -31,6 +33,7 @@ class StatusIngestContext:
     save_yaml: SaveYaml
     projection_options: Mapping[str, Any] | None = None
     persist_immediately: bool = True
+    include_history: bool = True
 
 
 def status_file_path(save_path: str, job_id: str, sweep_id: object | None = None) -> str:
@@ -48,10 +51,28 @@ def history_file_path(save_path: str, job_id: str, sweep_id: object | None = Non
 
 
 def update_running_experiment_info(exp: dict[str, Any], context: StatusIngestContext) -> dict[str, Any] | None:
-    """Read a target status file and project it into an experiment row."""
+    """Read a target status file and project it into an experiment row.
+
+    Set ``context.include_history`` to false for the high-volume status-only
+    path. Low-volume callers retain incremental history ingestion by default,
+    while dashboard drill-in callers can always request a complete history
+    through :func:`force_read_full_history`.
+    """
     job_id = exp.get("job_id")
     hpc_type = exp.get("hpc_assignment")
-    if not job_id or not hpc_type:
+    if not job_id:
+        return None
+    job_id = str(job_id)
+
+    terminal = is_terminal_status(exp.get("status"))
+    if terminal:
+        _bound_terminal_history(exp)
+        if _terminal_telemetry_is_finalized(exp, job_id):
+            return None
+
+    if not hpc_type:
+        if terminal:
+            _record_terminal_telemetry_attempt(exp, job_id, result="missing_hpc")
         return None
 
     save_path = exp.get("save_path")
@@ -59,22 +80,35 @@ def update_running_experiment_info(exp: dict[str, Any], context: StatusIngestCon
         cluster_config = context.hpc_configs.get(hpc_type)
         save_path = getattr(cluster_config, "save_path", None) if cluster_config else None
     if not save_path:
+        if terminal:
+            _record_terminal_telemetry_attempt(exp, job_id, result="missing_save_path")
         return None
     exp.setdefault("save_path", str(save_path))
 
-    path = status_file_path(str(save_path), str(job_id), exp.get("sweep_id"))
-    out, _ = context.connection_manager.run_command(hpc_type, f"cat {path} 2>/dev/null")
+    path = status_file_path(str(save_path), job_id, exp.get("sweep_id"))
+    try:
+        out, _ = context.connection_manager.run_command(hpc_type, f"cat {path} 2>/dev/null")
+    except Exception:
+        if terminal:
+            _record_terminal_telemetry_attempt(exp, job_id, result="read_error")
+        raise
     if not out.strip():
+        if terminal:
+            _record_terminal_telemetry_attempt(exp, job_id, result="missing")
         return None
 
     try:
         status = OrchestratorStatus.model_validate_json(out)
     except Exception as exc:
         logger.debug("Ignoring invalid target status file for job %s: %s", job_id, exc)
+        if terminal:
+            _record_terminal_telemetry_attempt(exp, job_id, result="invalid")
         return None
 
-    if str(status.job_id) != str(job_id):
+    if str(status.job_id) != job_id:
         logger.debug("Ignoring status file job mismatch for %s: payload has %s", job_id, status.job_id)
+        if terminal:
+            _record_terminal_telemetry_attempt(exp, job_id, result="job_mismatch")
         return None
 
     data = status.model_dump(mode="json")
@@ -83,10 +117,13 @@ def update_running_experiment_info(exp: dict[str, Any], context: StatusIngestCon
         apply_target_status_to_experiment(exp, status, context.projection_options)
         if not context.persist_immediately:
             exp["last_metrics_update"] = status.last_update
-    if _is_active_history_status(exp.get("status")):
+    if context.include_history and _is_active_history_status(exp.get("status")):
         _read_and_merge_history(exp, context)
-    elif is_terminal_status(exp.get("status")):
-        _bound_terminal_history(exp)
+    if terminal:
+        if status.status == "completed":
+            _finalize_terminal_telemetry(exp, job_id, result="callback_completed")
+        else:
+            _record_terminal_telemetry_attempt(exp, job_id, result=f"callback_{status.status}")
     if status_changed and context.persist_immediately:
         update_experiment_config_with_metrics(exp, data, context)
     return data
@@ -155,6 +192,50 @@ def _is_active_history_status(status: Any) -> bool:
     return status in {ExperimentStatus.RUNNING, ExperimentStatus.QUEUED}
 
 
+def _terminal_telemetry_is_finalized(exp: Mapping[str, Any], job_id: str) -> bool:
+    """Return whether final telemetry collection is retired for ``job_id``."""
+    state = exp.get(TERMINAL_TELEMETRY_STATE_FIELD)
+    return isinstance(state, Mapping) and str(state.get("job_id")) == job_id and state.get("finalized") is True
+
+
+def _record_terminal_telemetry_attempt(exp: dict[str, Any], job_id: str, *, result: str) -> None:
+    """Record a terminal telemetry attempt and retire it at the retry bound."""
+    state = _terminal_telemetry_state(exp, job_id)
+    attempts = _nonnegative_int(state.get("attempts")) + 1
+    state.update({"attempts": attempts, "last_result": result})
+    if attempts >= TERMINAL_TELEMETRY_MAX_ATTEMPTS:
+        state.update({"finalized": True, "finalized_reason": "retry_limit"})
+
+
+def _finalize_terminal_telemetry(exp: dict[str, Any], job_id: str, *, result: str) -> None:
+    """Retire terminal telemetry immediately after observing a final callback."""
+    state = _terminal_telemetry_state(exp, job_id)
+    state.update(
+        {
+            "attempts": _nonnegative_int(state.get("attempts")) + 1,
+            "last_result": result,
+            "finalized": True,
+            "finalized_reason": result,
+        }
+    )
+
+
+def _terminal_telemetry_state(exp: dict[str, Any], job_id: str) -> dict[str, Any]:
+    """Return mutable terminal telemetry state scoped to the current job."""
+    state = exp.get(TERMINAL_TELEMETRY_STATE_FIELD)
+    if not isinstance(state, dict) or str(state.get("job_id")) != job_id:
+        state = {"job_id": job_id, "attempts": 0, "finalized": False}
+        exp[TERMINAL_TELEMETRY_STATE_FIELD] = state
+    return state
+
+
+def _nonnegative_int(value: object) -> int:
+    try:
+        return max(int(value or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _status_payload_already_ingested(exp: Mapping[str, Any], status: OrchestratorStatus) -> bool:
     """Return whether ``exp`` already contains this version of the status payload."""
     last_metrics_update = exp.get("last_metrics_update")
@@ -182,7 +263,8 @@ def update_experiment_config_with_metrics(
 
         for current_exp in current_data["experiments"]:
             if current_exp.get("experiment_id") == exp.get("experiment_id"):
-                for key in status_projection_fields(**dict(context.projection_options or {})):
+                projection_fields = status_projection_fields(**dict(context.projection_options or {}))
+                for key in (*projection_fields, TERMINAL_TELEMETRY_STATE_FIELD):
                     if key in exp:
                         current_exp[key] = exp[key]
                 current_exp["last_metrics_update"] = data.get("last_update")
@@ -210,6 +292,8 @@ def populate_display_metrics(experiments: list[dict[str, Any]]) -> None:
 __all__ = [
     "HISTORY_TERMINAL_BOUND",
     "StatusIngestContext",
+    "TERMINAL_TELEMETRY_MAX_ATTEMPTS",
+    "TERMINAL_TELEMETRY_STATE_FIELD",
     "apply_target_status_to_experiment",
     "extract_display_metrics",
     "force_read_full_history",

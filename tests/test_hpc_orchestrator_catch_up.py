@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 from pathlib import Path
 
 import pytest
@@ -10,6 +9,7 @@ from slurminator.config import HPCType
 from slurminator.experiments import ExperimentStatus
 from slurminator.experiments.yaml_utils import dump_yaml
 from slurminator.hpc_orchestrator import HPCOrchestrator
+from slurminator.scheduler_polling import SchedulerStatusUpdateResult, SchedulerTransition
 from slurminator.status_ingest import StatusIngestContext
 
 pytestmark = pytest.mark.unit
@@ -31,7 +31,9 @@ def _orchestrator(tmp_path: Path, experiments: list[dict]) -> HPCOrchestrator:
     )
 
 
-def test_catch_up_existing_state_reconciles_and_saves_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_catch_up_existing_state_verifies_scheduler_without_slow_io(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     orchestrator = _orchestrator(
         tmp_path,
         [
@@ -45,27 +47,44 @@ def test_catch_up_existing_state_reconciles_and_saves_once(tmp_path: Path, monke
         ],
     )
     update_calls: list[list[dict]] = []
-    estimate_calls: list[list[dict]] = []
-    saved: list[dict] = []
+    transition = SchedulerTransition(
+        experiment_id="queued-1",
+        job_id="12345",
+        hpc_type=HPCType.OLIVIA,
+        old_status=ExperimentStatus.QUEUED,
+        new_status=ExperimentStatus.COMPLETED,
+        timestamp=100.0,
+        timestamp_field="completed_timestamp",
+    )
 
-    def update_statuses(experiments: list[dict]) -> None:
+    def refresh_scheduler(experiments: list[dict]) -> SchedulerStatusUpdateResult:
         update_calls.append(experiments)
         experiments[0]["status"] = ExperimentStatus.COMPLETED
-        experiments[0]["last_metrics_update"] = 100.0
+        experiments[0]["last_change_ts"] = 100.0
+        return SchedulerStatusUpdateResult((transition,), ())
 
-    monkeypatch.setattr(orchestrator, "_update_statuses", update_statuses)
-    monkeypatch.setattr(orchestrator, "_update_queue_estimates", lambda exps: estimate_calls.append(exps))
-    monkeypatch.setattr(orchestrator, "_save_yaml", lambda data: saved.append(copy.deepcopy(data)))
+    monkeypatch.setattr(orchestrator, "_refresh_scheduler_statuses", refresh_scheduler)
+    monkeypatch.setattr(
+        orchestrator,
+        "_update_telemetry",
+        lambda *_args, **_kwargs: pytest.fail("startup scheduler verification must not ingest telemetry"),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_update_queue_estimates",
+        lambda _exps: pytest.fail("startup scheduler verification must not query queue estimates"),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_save_yaml",
+        lambda _data: pytest.fail("scheduler transitions are journaled without a full YAML checkpoint"),
+    )
 
     result = orchestrator._catch_up_existing_state()
 
     assert result is not None
     assert result["experiments"][0]["status"] == ExperimentStatus.COMPLETED
     assert len(update_calls) == 1
-    assert len(estimate_calls) == 1
-    assert len(saved) == 1
-    assert saved[0]["experiments"][0]["status"] == ExperimentStatus.COMPLETED
-    assert saved[0]["experiments"][0]["last_metrics_update"] == 100.0
     assert orchestrator._dashboard_snapshot[0]["status"] == ExperimentStatus.COMPLETED
 
 
@@ -84,10 +103,15 @@ def test_catch_up_existing_state_skips_io_without_active_rows(tmp_path: Path, mo
     def unexpected_save(_data: dict) -> None:
         raise AssertionError("no catch-up means no ledger save")
 
-    monkeypatch.setattr(orchestrator, "_update_statuses", unexpected_update)
+    monkeypatch.setattr(orchestrator, "_refresh_scheduler_statuses", unexpected_update)
     monkeypatch.setattr(orchestrator, "_save_yaml", unexpected_save)
 
-    assert orchestrator._catch_up_existing_state() is None
+    data = orchestrator._load_yaml()
+    monkeypatch.setattr(
+        orchestrator, "_load_yaml", lambda: pytest.fail("the already-loaded startup ledger should be reused")
+    )
+
+    assert orchestrator._catch_up_existing_state(data) is None
 
 
 def test_orchestrator_telemetry_ingest_uses_batched_persistence(
@@ -99,10 +123,15 @@ def test_orchestrator_telemetry_ingest_uses_batched_persistence(
     def capture_context(exp: dict, context: StatusIngestContext) -> None:
         captured["exp"] = exp
         captured["persist_immediately"] = context.persist_immediately
+        captured["include_history"] = context.include_history
 
     monkeypatch.setattr(hpc_orchestrator_module, "update_running_experiment_info", capture_context)
     exp = {"experiment_id": "running-1"}
 
     orchestrator._update_running_experiment_info(exp)
 
-    assert captured == {"exp": exp, "persist_immediately": False}
+    assert captured == {"exp": exp, "persist_immediately": False, "include_history": True}
+
+    orchestrator._update_running_experiment_info(exp, include_history=False)
+
+    assert captured["include_history"] is False

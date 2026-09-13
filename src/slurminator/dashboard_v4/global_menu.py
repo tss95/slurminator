@@ -8,6 +8,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Label, ListItem, ListView
 
 from slurminator.dashboard_v4.commands import submit_command
+from slurminator.dashboard_v4.experiment_info_screen import ExperimentInfoScreen
 from slurminator.dashboard_v4.forms.concurrency_form import ConcurrencyFormScreen
 from slurminator.dashboard_v4.forms.global_settings_form import GlobalSettingsFormScreen
 from slurminator.dashboard_v4.forms.table_sort_form import TableSortFormScreen
@@ -34,6 +35,7 @@ class GlobalMenuScreen(ModalScreen[None]):
                 ListItem(Label("Set Slurm overrides"), id="set-global-settings"),
                 ListItem(Label("Set table sort"), id="set-table-sort"),
                 ListItem(Label("Cancel all queued/running jobs"), id="cancel-all"),
+                ListItem(Label("Show exp info"), id="show-exp-info"),
                 ListItem(Label("Help"), id="help"),
                 ListItem(Label("Close"), id="close-global-menu"),
                 id="global-actions",
@@ -55,6 +57,8 @@ class GlobalMenuScreen(ModalScreen[None]):
         elif event.item.id == "cancel-all":
             submit_command(self.app.command_save_path(), "cancel_all", {"scope": "session"})
             self.app.pop_screen()
+        elif event.item.id == "show-exp-info":
+            self.app.push_screen(ExperimentInfoScreen())
         elif event.item.id == "help":
             self.app.push_screen(HelpScreen())
         elif event.item.id == "close-global-menu":

@@ -15,6 +15,7 @@ from slurminator.cli.override_parser import parse_override_list
 from slurminator.command_queue import CommandQueueContext, default_command_handlers, process_command_queue
 from slurminator.config import HPCType, HPC_CONFIGS, is_current_hpc
 from slurminator.experiments import ExperimentStatus
+from slurminator.experiments.experiment_info import ExperimentInfo
 from slurminator.experiment_policy import resolve_extra_remote_dirs, resolve_resource_overrides
 from slurminator.hpc_state import is_terminal_status
 from slurminator.plugins import CommandBuildContext, DefaultOrchestratorPlugin, OrchestratorPlugin
@@ -27,7 +28,13 @@ from slurminator.log_gathering import (
     read_log_tail_incremental,
 )
 from slurminator.reassignment import ReassignmentContext, maybe_reassign_experiments
-from slurminator.scheduler_polling import expand_short, map_state, poll_hpc, update_scheduler_statuses
+from slurminator.scheduler_polling import (
+    SchedulerStatusUpdateResult,
+    expand_short,
+    map_state,
+    poll_hpc,
+    update_scheduler_statuses,
+)
 from slurminator.state_store import ExperimentStateStore, replace_exp_in_list
 from slurminator.status_ingest import (
     StatusIngestContext,
@@ -50,6 +57,19 @@ from slurminator.timeout_policy import (
 _parse_override_list = parse_override_list
 
 logger = logging.getLogger("slurminator")
+
+DEFAULT_HIGH_VOLUME_THRESHOLD = 100
+DEFAULT_STATE_CHECKPOINT_INTERVAL_SECONDS = 60.0
+DEFAULT_TELEMETRY_INTERVAL_SECONDS = 10.0
+DEFAULT_TELEMETRY_BATCH_SIZE = 64
+LOW_COMPUTE_POLL_INTERVAL_SECONDS = 60
+LOW_COMPUTE_CHECKPOINT_INTERVAL_SECONDS = 300.0
+LOW_COMPUTE_TELEMETRY_BATCH_SIZE = 32
+LOW_COMPUTE_SUBMISSION_BATCH_SIZE = 8
+LOW_COMPUTE_SUBMISSION_BATCH_SECONDS = 2.0
+HIGH_VOLUME_TRANSIENT_HISTORY_FIELDS = frozenset(
+    {"history", "history_last_read_offset", "history_attempt_max", "history_truncated"}
+)
 
 IsLocalHPC = Callable[[HPCType], bool]
 OverviewPrinter = Callable[[list[dict[str, Any]]], None]
@@ -109,9 +129,18 @@ class HPCOrchestrator:
         submission_batch_size: int = 8,
         submission_batch_seconds: float = 2.0,
         submission_checkpoint_size: int = 32,
-    ):
+        high_volume_threshold: int = DEFAULT_HIGH_VOLUME_THRESHOLD,
+        state_checkpoint_interval_seconds: float = DEFAULT_STATE_CHECKPOINT_INTERVAL_SECONDS,
+        telemetry_interval_seconds: float = DEFAULT_TELEMETRY_INTERVAL_SECONDS,
+        telemetry_batch_size: int = DEFAULT_TELEMETRY_BATCH_SIZE,
+        low_compute: bool = False,
+    ) -> None:
+        if low_compute and (not math.isfinite(poll_interval) or poll_interval <= 0):
+            raise ValueError("poll_interval must be a positive finite number in low-compute mode")
+        self.low_compute = low_compute
         self.experiment_file = Path(experiment_file).resolve()
         self.experiment_dir = self.experiment_file.parent
+        self.experiment_info = ExperimentInfo()
 
         self.output_dir = self.experiment_dir / "outputs" / self.experiment_file.stem
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -131,8 +160,41 @@ class HPCOrchestrator:
         if submission_checkpoint_size <= 0:
             raise ValueError("submission_checkpoint_size must be a positive integer")
         self.submission_checkpoint_size = int(submission_checkpoint_size)
+        if high_volume_threshold <= 0:
+            raise ValueError("high_volume_threshold must be a positive integer")
+        self.high_volume_threshold = int(high_volume_threshold)
+        if not math.isfinite(state_checkpoint_interval_seconds) or state_checkpoint_interval_seconds <= 0:
+            raise ValueError("state_checkpoint_interval_seconds must be a positive finite number")
+        self.state_checkpoint_interval_seconds = float(state_checkpoint_interval_seconds)
+        if not math.isfinite(telemetry_interval_seconds) or telemetry_interval_seconds <= 0:
+            raise ValueError("telemetry_interval_seconds must be a positive finite number")
+        self.telemetry_interval_seconds = float(telemetry_interval_seconds)
+        if telemetry_batch_size <= 0:
+            raise ValueError("telemetry_batch_size must be a positive integer")
+        self.telemetry_batch_size = int(telemetry_batch_size)
+        self.high_volume_mode = False
+        self._last_state_checkpoint_at: float | None = None
+        self._last_telemetry_poll_at: float | None = None
+        self._telemetry_cursor = 0
         self._prepared_submission_repositories: set[HPCType] = set()
         self.poll_interval = poll_interval
+        if self.low_compute:
+            self.poll_interval = max(self.poll_interval, LOW_COMPUTE_POLL_INTERVAL_SECONDS)
+            self.telemetry_interval_seconds = max(self.telemetry_interval_seconds, self.poll_interval)
+            self.state_checkpoint_interval_seconds = max(
+                self.state_checkpoint_interval_seconds, LOW_COMPUTE_CHECKPOINT_INTERVAL_SECONDS, self.poll_interval
+            )
+            self.telemetry_batch_size = min(self.telemetry_batch_size, LOW_COMPUTE_TELEMETRY_BATCH_SIZE)
+            self.submission_batch_size = min(self.submission_batch_size, LOW_COMPUTE_SUBMISSION_BATCH_SIZE)
+            self.submission_batch_seconds = min(self.submission_batch_seconds, LOW_COMPUTE_SUBMISSION_BATCH_SECONDS)
+            logger.info(
+                "Low-compute mode: scheduler/telemetry intervals >= %ss, YAML checkpoints >= %ss, "
+                "at most %d status reads and one submission batch (up to %d jobs) per cycle.",
+                self.poll_interval,
+                self.state_checkpoint_interval_seconds,
+                self.telemetry_batch_size,
+                self.submission_batch_size,
+            )
         self.max_unqueue_seconds = max_unqueue_seconds
 
         self.local_log_dir = Path(local_log_dir).resolve()
@@ -235,22 +297,12 @@ class HPCOrchestrator:
 
             self.connection_manager = HPCConnectionManager(configs=connection_configs)
 
-        # ---------------------------------------------------------------
-        # Detect if the supplied YAML defines a sweep (multiple experiments)
-        # ---------------------------------------------------------------
-        try:
-            data_yaml = self._load_yaml()
-            if isinstance(data_yaml, dict):
-                self.multi_experiment = len(data_yaml.get("experiments", [])) > 1
-            else:
-                self.multi_experiment = False
-        except Exception:
-            # In case of any parsing error, default to single-experiment behaviour
-            self.multi_experiment = False
-        logger.debug(f"[HPCOrchestrator] multi_experiment set to {self.multi_experiment}")
+        # Resolved from the already-required startup load in ``run``. Avoiding
+        # an eager parse here matters for very large experiment ledgers.
+        self.multi_experiment = False
 
-    def run(self):
-        """Main loop: manage experiments and render progress."""
+    def run(self) -> None:
+        """Manage experiments and print the YAML reference after shutdown."""
         # Lazily import the Rich dashboard only when we actually need it to avoid
         # hard dependency issues in "--debug" / unit-test scenarios where Rich
         # might not be available.
@@ -277,11 +329,13 @@ class HPCOrchestrator:
         # ------------------------------------------------------------------
         try:
             data = self._load_yaml()
+            self._configure_volume_mode(data)
             self._preflight_validate_experiments(data)
         except Exception:
             logger.error("Pre-flight sanity-check failed. Aborting orchestrator startup.")
             raise
 
+        all_done = False
         try:
             # ------------------------------------------------------------------
             # 1) HPC connections are already established earlier.  We still
@@ -296,16 +350,18 @@ class HPCOrchestrator:
             # Ensure HPC directories
             for hpc_type in self.connection_manager.configs.keys():
                 if self.concurrency_limits.get(hpc_type, 0) > 0:
-                    self._ensure_remote_dirs(hpc_type)
+                    self._ensure_remote_dirs(hpc_type, data=data)
                     self.plugin.prepare_remote_runtime(hpc_type=hpc_type, connection_manager=self.connection_manager)
 
             # Fix potential orphans before we start the dashboard
-            self._recover_orphans()
+            data = self._recover_orphans(data)
 
-            # Reconcile scheduler and callback state once before entering the
-            # normal dashboard/submission cycle. This is especially important
-            # when resuming an existing ledger with --yaml.
-            resume_data = self._catch_up_existing_state()
+            # Verify scheduler-owned state once before entering the normal
+            # dashboard/submission cycle. Telemetry remains on its own cadence.
+            resume_data = self._catch_up_existing_state(data)
+            data = resume_data if resume_data is not None else data
+            scheduler_verified = resume_data is not None
+            first_cycle = True
 
             # ------------------------------------------------------------------
             # 2) Enter UI loop
@@ -317,34 +373,26 @@ class HPCOrchestrator:
                     print_overview = self.overview_printer
 
                 while True:
-                    caught_up_this_cycle = resume_data is not None
-                    data = resume_data if resume_data is not None else self._load_yaml()
-                    resume_data = None
+                    if not first_cycle and not self.high_volume_mode:
+                        data = self._load_yaml()
                     exps = data["experiments"]
 
-                    processed_commands = self._process_command_queue(exps)
-                    if processed_commands:
-                        data["experiments"] = exps
-                        self._save_yaml(data)
-                        self._publish_dashboard_snapshot(exps)
-                    if not caught_up_this_cycle:
-                        self._update_statuses(exps)
-                        self._update_queue_estimates(exps)
-
-                    concurrency_used = self._fill_available_capacity(exps, data)
-                    if not self.submissions_paused:
-                        self._maybe_reassign_experiments(exps, concurrency_used, data)
-
-                    data["experiments"] = exps
-                    self._save_yaml(data)
+                    self._maintain_cycle(data, scheduler_already_verified=scheduler_verified and first_cycle)
+                    all_done = self._all_done(exps)
+                    if self.high_volume_mode:
+                        if all_done:
+                            self._save_yaml(data)
+                        elif self._state_checkpoint_due():
+                            self._checkpoint_and_repoll(data)
                     self._publish_dashboard_snapshot(exps)
 
                     print_overview(exps)
 
-                    if self._all_done(exps):
+                    if all_done:
                         logger.info("All experiments terminal => exiting orchestrator.")
                         break
 
+                    first_cycle = False
                     time.sleep(self.poll_interval)
             else:
                 DashboardCls = self._resolve_dashboard_cls()
@@ -354,70 +402,194 @@ class HPCOrchestrator:
                     dashboard_kwargs["sparkline_thresholds"] = getattr(self.dashboard_settings, "sparkline", None)
                     dashboard_kwargs["table_sort"] = getattr(self.dashboard_settings, "table_sort", None)
                 dash = DashboardCls(**dashboard_kwargs)
-                initial_exps = self._publish_current_dashboard_snapshot()
+                initial_exps = self._publish_current_dashboard_snapshot(data)
 
                 with dash.mount(self) as live:
                     live.update(dash.render(initial_exps))
                     while True:
-                        caught_up_this_cycle = resume_data is not None
-                        data = resume_data if resume_data is not None else self._load_yaml()
-                        resume_data = None
+                        if not first_cycle and not self.high_volume_mode:
+                            data = self._load_yaml()
                         exps = data["experiments"]
 
-                        processed_commands = self._process_command_queue(exps)
-                        if processed_commands:
-                            data["experiments"] = exps
-                            self._save_yaml(data)
-                            self._render_dashboard_snapshot(dash, exps, live=live)
-                        if self._dashboard_requested_exit(dash):
-                            logger.info("Dashboard requested orchestrator exit.")
-                            break
-                        if not caught_up_this_cycle:
-                            self._update_statuses(exps)
-                            self._update_queue_estimates(exps)
-                            self._render_dashboard_snapshot(dash, exps, live=live)
-                        if self._dashboard_requested_exit(dash):
-                            logger.info("Dashboard requested orchestrator exit.")
-                            break
-
-                        concurrency_used = self._fill_available_capacity(
-                            exps,
+                        self._maintain_cycle(
                             data,
+                            scheduler_already_verified=scheduler_verified and first_cycle,
                             on_refresh=lambda current_exps: self._render_dashboard_snapshot(
                                 dash, current_exps, live=live
                             ),
                             should_stop=lambda: self._dashboard_requested_exit(dash),
                         )
-                        if not self.submissions_paused:
-                            self._maybe_reassign_experiments(exps, concurrency_used, data)
 
-                        data["experiments"] = exps
-                        self._save_yaml(data)
+                        exit_requested = self._dashboard_requested_exit(dash)
+                        all_done = self._all_done(exps)
+                        if self.high_volume_mode:
+                            if exit_requested or all_done:
+                                self._checkpoint_and_repoll(data, repoll=not all_done)
+                            elif self._state_checkpoint_due():
+                                self._checkpoint_and_repoll(data)
 
                         self._render_dashboard_snapshot(dash, exps, live=live)
 
-                        if self._dashboard_requested_exit(dash):
+                        if exit_requested:
                             logger.info("Dashboard requested orchestrator exit.")
                             break
 
-                        if self._all_done(exps):
+                        if all_done:
                             logger.info("All experiments terminal => exiting orchestrator.")
                             # Ensure display metrics are populated for final render
                             self._render_dashboard_snapshot(dash, exps, live=live)
                             break
 
+                        first_cycle = False
                         if self._sleep_until_next_poll(dash):
+                            if self.high_volume_mode:
+                                self._checkpoint_and_repoll(data)
                             logger.info("Dashboard requested orchestrator exit.")
                             break
 
         except KeyboardInterrupt:
             logger.info("User interrupted HPC Orchestrator.")
+            if self.high_volume_mode and data is not None:
+                self._checkpoint_and_repoll(data)
         except Exception as e:
             logger.error(f"Orchestrator error: {e}", exc_info=True)
             raise
         finally:
             logger.info("Closing HPC connections.")
             self.connection_manager.close_all()
+
+        # Keep this plain and last so humans and agents can copy the YAML path.
+        outcome = "COMPLETE" if all_done else "STOPPED"
+        print(f"EXPERIMENT {outcome}: {self.experiment_file}", flush=True)
+
+    def _configure_volume_mode(self, data: Mapping[str, Any]) -> None:
+        """Use bounded in-memory maintenance for large ledgers or low-compute mode."""
+        experiments = data.get("experiments", [])
+        experiment_count = len(experiments) if isinstance(experiments, list) else 0
+        self.high_volume_threshold = int(getattr(self, "high_volume_threshold", DEFAULT_HIGH_VOLUME_THRESHOLD))
+        self.state_checkpoint_interval_seconds = float(
+            getattr(self, "state_checkpoint_interval_seconds", DEFAULT_STATE_CHECKPOINT_INTERVAL_SECONDS)
+        )
+        self.telemetry_interval_seconds = float(
+            getattr(self, "telemetry_interval_seconds", DEFAULT_TELEMETRY_INTERVAL_SECONDS)
+        )
+        self.telemetry_batch_size = int(getattr(self, "telemetry_batch_size", DEFAULT_TELEMETRY_BATCH_SIZE))
+        self.multi_experiment = experiment_count > 1
+        self.high_volume_mode = getattr(self, "low_compute", False) or experiment_count >= self.high_volume_threshold
+        now = time.monotonic()
+        self._last_state_checkpoint_at = now
+        self._last_telemetry_poll_at = None
+        self._telemetry_cursor = 0
+        if self.high_volume_mode:
+            histories_deferred = self._discard_cached_histories(experiments)
+            logger.info(
+                "High-volume maintenance enabled for %d experiments: scheduler state is journaled every cycle, "
+                "status-only telemetry is bounded to %d rows every %.0fs, and the YAML ledger checkpoints every %.0fs.",
+                experiment_count,
+                self.telemetry_batch_size,
+                self.telemetry_interval_seconds,
+                self.state_checkpoint_interval_seconds,
+            )
+            if histories_deferred:
+                logger.info(
+                    "Deferred cached metric history for %d experiment(s); detail and plot screens reload it on demand.",
+                    histories_deferred,
+                )
+
+    @staticmethod
+    def _discard_cached_histories(experiments: list[dict[str, Any]]) -> int:
+        """Drop reconstructable history payloads from a high-volume in-memory ledger."""
+        changed_rows = 0
+        for exp in experiments:
+            if not isinstance(exp, dict):
+                continue
+            had_history_state = any(field in exp for field in HIGH_VOLUME_TRANSIENT_HISTORY_FIELDS)
+            for field in HIGH_VOLUME_TRANSIENT_HISTORY_FIELDS:
+                exp.pop(field, None)
+            changed_rows += int(had_history_state)
+        return changed_rows
+
+    def _maintain_cycle(
+        self,
+        data: dict[str, Any],
+        *,
+        scheduler_already_verified: bool = False,
+        on_refresh: Callable[[list[dict[str, Any]]], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> None:
+        """Run one scheduler/submission cycle using the selected volume policy."""
+        exps = data["experiments"]
+        processed_commands = self._process_command_queue(exps)
+        if processed_commands:
+            data["experiments"] = exps
+            self._save_yaml(data)
+            if on_refresh is not None and not self.high_volume_mode:
+                on_refresh(exps)
+
+        stop_requested = should_stop is not None and should_stop()
+        if not stop_requested:
+            if self.high_volume_mode:
+                if not scheduler_already_verified:
+                    result = self._refresh_scheduler_statuses(exps)
+                    if self._scheduler_retry_became_ready(result, exps):
+                        self._save_yaml(data)
+                if self._telemetry_poll_due():
+                    self._update_telemetry(exps, include_history=False, max_experiments=self.telemetry_batch_size)
+                    self._update_queue_estimates(exps)
+                    self._last_telemetry_poll_at = time.monotonic()
+            elif scheduler_already_verified:
+                self._update_telemetry(exps, include_history=True)
+                self._update_queue_estimates(exps)
+            else:
+                self._update_statuses(exps)
+                self._update_queue_estimates(exps)
+
+            if on_refresh is not None and not self.high_volume_mode:
+                on_refresh(exps)
+
+        stop_requested = stop_requested or (should_stop is not None and should_stop())
+        if not stop_requested:
+            concurrency_used = self._fill_available_capacity(
+                exps,
+                data,
+                # Large snapshots are intentionally rendered once per outer
+                # cycle, not between every submission microburst.
+                on_refresh=None if self.high_volume_mode else on_refresh,
+                should_stop=should_stop,
+            )
+            if not self.submissions_paused:
+                self._maybe_reassign_experiments(exps, concurrency_used, data)
+
+        data["experiments"] = exps
+        if not self.high_volume_mode:
+            self._save_yaml(data)
+
+    def _telemetry_poll_due(self, *, now: float | None = None) -> bool:
+        """Return whether the high-volume telemetry lane should run."""
+        current = time.monotonic() if now is None else now
+        last_poll = self._last_telemetry_poll_at
+        return last_poll is None or current - last_poll >= self.telemetry_interval_seconds
+
+    def _state_checkpoint_due(self, *, now: float | None = None) -> bool:
+        """Return whether the high-volume in-memory ledger needs compaction."""
+        current = time.monotonic() if now is None else now
+        last_checkpoint = self._last_state_checkpoint_at
+        return last_checkpoint is None or current - last_checkpoint >= self.state_checkpoint_interval_seconds
+
+    def _checkpoint_and_repoll(self, data: dict[str, Any], *, repoll: bool = True) -> None:
+        """Checkpoint the ledger; low-compute mode waits for the next scheduled poll."""
+        self._save_yaml(data)
+        if not repoll or getattr(self, "low_compute", False):
+            return
+        exps = data["experiments"]
+        if not any(
+            exp.get("job_id") and exp.get("status") in {ExperimentStatus.QUEUED, ExperimentStatus.RUNNING}
+            for exp in exps
+        ):
+            return
+        result = self._refresh_scheduler_statuses(exps)
+        if self._scheduler_retry_became_ready(result, exps):
+            self._save_yaml(data)
 
     def _preflight_validate_experiments(self, data: Mapping[str, Any]) -> int:
         """Validate a fresh ledger, or skip repeated validation for a clear resume."""
@@ -506,31 +678,41 @@ class HPCOrchestrator:
         self._dashboard_snapshot = copy.deepcopy(exps)
         self._dashboard_snapshot_version += 1
 
-    def _publish_current_dashboard_snapshot(self) -> list[dict[str, Any]]:
+    def _publish_current_dashboard_snapshot(self, data: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
         """Publish the current ledger before expensive poll-cycle work starts."""
-        data = self._load_yaml()
+        if data is None:
+            data = self._load_yaml()
         exps = data.get("experiments", [])
         populate_display_metrics(exps)
         self._publish_dashboard_snapshot(exps)
         return exps
 
-    def _catch_up_existing_state(self) -> dict[str, Any] | None:
-        """Reconcile active rows once and return the persisted resume snapshot."""
-        data = self._load_yaml()
+    def _catch_up_existing_state(self, data: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        """Verify active scheduler rows once without running slow telemetry work."""
+        if data is None:
+            data = self._load_yaml()
         exps = data.get("experiments", [])
+        recovered_timeout_retry = self._recover_timeout_retry_decisions(exps)
+        if recovered_timeout_retry:
+            data["experiments"] = exps
+            self._save_yaml(data)
         active_before = sum(
             1
             for exp in exps
             if exp.get("job_id") and exp.get("status") in {ExperimentStatus.QUEUED, ExperimentStatus.RUNNING}
         )
         if active_before == 0:
+            if recovered_timeout_retry:
+                self._publish_dashboard_snapshot(exps)
+                return data
             return None
 
-        logger.info("Reconciling %d active experiment(s) before entering the submission loop.", active_before)
-        self._update_statuses(exps)
-        self._update_queue_estimates(exps)
-        data["experiments"] = exps
-        self._save_yaml(data)
+        logger.info("Verifying %d active experiment(s) with Slurm before entering the submission loop.", active_before)
+        result = self._refresh_scheduler_statuses(exps)
+        if self._scheduler_retry_became_ready(result, exps):
+            # A TIMEOUT retry decision is not scheduler-owned and therefore is
+            # checkpointed before a replacement job can be submitted.
+            self._save_yaml(data)
         self._publish_dashboard_snapshot(exps)
 
         active_after = sum(
@@ -538,10 +720,43 @@ class HPCOrchestrator:
             for exp in exps
             if exp.get("job_id") and exp.get("status") in {ExperimentStatus.QUEUED, ExperimentStatus.RUNNING}
         )
-        logger.info(
-            "Resume reconciliation complete: %d active experiment(s) remain; ledger persisted once.", active_after
-        )
+        if result.succeeded:
+            logger.info(
+                "Scheduler verification complete: %d transition(s) journaled; %d active experiment(s) remain.",
+                len(result.transitions),
+                active_after,
+            )
+        else:
+            unresolved_jobs = sum(len(poll.unresolved_job_ids) for poll in result.hpc_polls)
+            logger.warning(
+                "Scheduler verification incomplete: %d poll failure(s), %d unresolved job(s), %d skipped row(s); "
+                "%d active experiment(s) remain and will be retried next cycle.",
+                len(result.failures),
+                unresolved_jobs,
+                len(result.skipped),
+                active_after,
+            )
         return data
+
+    def _recover_timeout_retry_decisions(self, exps: list[dict[str, Any]]) -> bool:
+        """Reapply an interrupted TIMEOUT retry decision after journal replay."""
+        if not self.retry_timeout_with_estimated_time:
+            return False
+        changed = False
+        for exp in exps:
+            if exp.get("status") != ExperimentStatus.TIMEOUT:
+                continue
+            hpc_type = self._coerce_hpc_type(exp.get("hpc_assignment"))
+            if hpc_type is None:
+                logger.warning(
+                    "Cannot recover timeout retry for %s without a valid HPC assignment.", exp.get("experiment_id")
+                )
+                continue
+            before = (exp.get("status"), exp.get("timeout_retry_count"), exp.get("time_hours_override"))
+            self._apply_timeout_policy(exp, hpc_type, "resume after durable scheduler TIMEOUT")
+            after = (exp.get("status"), exp.get("timeout_retry_count"), exp.get("time_hours_override"))
+            changed = changed or after != before
+        return changed
 
     def _render_dashboard_snapshot(self, dashboard: Any, exps: list[dict[str, Any]], *, live: Any) -> None:
         """Publish and render a dashboard snapshot after visible state changes."""
@@ -618,11 +833,12 @@ class HPCOrchestrator:
     # -------------------------------------------------------------------------
     # Orphan fix
     # -------------------------------------------------------------------------
-    def _recover_orphans(self):
+    def _recover_orphans(self, data: dict[str, Any] | None = None) -> dict[str, Any]:
         """
         If experiment is QUEUED/RUNNING but missing 'job_id', revert => PENDING
         """
-        data = self._load_yaml()
+        if data is None:
+            data = self._load_yaml()
         changed = False
         for exp in data["experiments"]:
             st = exp.get("status")
@@ -639,40 +855,85 @@ class HPCOrchestrator:
                 changed = True
         if changed:
             self._save_yaml(data)
+        return data
 
     # -------------------------------------------------------------------------
     # HPC Status Polling
     # -------------------------------------------------------------------------
-    def _update_statuses(self, exps: List[dict]):
+    def _update_statuses(self, exps: list[dict[str, Any]]) -> SchedulerStatusUpdateResult:
         """
-        Poll HPC states via squeue/sacct. Update statuses for queued/running exps.
-        If a job is terminal, gather logs and apply terminal-status policies.
+        Poll scheduler state, then ingest legacy full telemetry/history eagerly.
         """
-        self._refresh_scheduler_statuses(exps)
+        result = self._refresh_scheduler_statuses(exps)
+        self._update_telemetry(exps, include_history=True)
+        return result
 
-        # --- NEW: live metric progress via status files -----------------
-        for e in exps:
-            if e.get("status") == ExperimentStatus.RUNNING:
-                try:
-                    self._update_running_experiment_info(e)
-                except Exception:
-                    pass
-            elif is_terminal_status(e.get("status")):
-                # Fetch final telemetry if the retained status file is still present.
-                # Terminal lifecycle is owned by this experiment YAML / sacct, not by
-                # status-file presence.
-                try:
-                    self._update_running_experiment_info(e)
-                except Exception:
-                    pass
+    def _refresh_scheduler_statuses(self, exps: list[dict[str, Any]]) -> SchedulerStatusUpdateResult:
+        """Refresh and durably journal scheduler-owned states only."""
+        result = update_scheduler_statuses(
+            exps, connection_manager=self.connection_manager, concurrency_limits=self.concurrency_limits
+        )
+        if result.transitions:
+            self.state_store.record_scheduler_transitions(result.transitions)
+            rows_by_id = {str(exp.get("experiment_id")): exp for exp in exps}
+            for transition in result.transitions:
+                exp = rows_by_id[transition.experiment_id]
+                if is_terminal_status(transition.new_status):
+                    exp["terminal_telemetry"] = {"job_id": transition.job_id, "attempts": 0, "finalized": False}
+                if transition.new_status == ExperimentStatus.TIMEOUT:
+                    self._apply_timeout_policy(exp, transition.hpc_type, "scheduler reported TIMEOUT")
+        return result
 
-    def _refresh_scheduler_statuses(self, exps: list[dict[str, Any]]) -> None:
-        """Refresh scheduler-owned states without scanning metric/history files."""
-        update_scheduler_statuses(
-            exps,
-            connection_manager=self.connection_manager,
-            concurrency_limits=self.concurrency_limits,
-            gather_logs=self._gather_logs,
+    @staticmethod
+    def _scheduler_retry_became_ready(result: SchedulerStatusUpdateResult, exps: list[dict[str, Any]]) -> bool:
+        """Return whether a terminal scheduler transition enabled a retry."""
+        transitioned_ids = {transition.experiment_id for transition in result.transitions}
+        return any(
+            str(exp.get("experiment_id")) in transitioned_ids
+            and exp.get("status") in {ExperimentStatus.PENDING, ExperimentStatus.PARTIAL}
+            for exp in exps
+        )
+
+    def _update_telemetry(
+        self, exps: list[dict[str, Any]], *, include_history: bool, max_experiments: int | None = None
+    ) -> int:
+        """Ingest a fair bounded set of live and explicitly pending final status files."""
+        candidates = [
+            exp
+            for exp in exps
+            if exp.get("status") == ExperimentStatus.RUNNING or self._terminal_telemetry_pending(exp)
+        ]
+        if not candidates:
+            self._telemetry_cursor = 0
+            return 0
+
+        candidate_count = len(candidates)
+        limit = candidate_count if max_experiments is None else min(max(int(max_experiments), 0), candidate_count)
+        if limit == 0:
+            return 0
+        start = self._telemetry_cursor % candidate_count
+        selected = [candidates[(start + offset) % candidate_count] for offset in range(limit)]
+        self._telemetry_cursor = (start + limit) % candidate_count
+
+        for exp in selected:
+            try:
+                self._update_running_experiment_info(exp, include_history=include_history)
+            except Exception as exc:
+                logger.warning("Telemetry update failed for %s: %s", exp.get("experiment_id"), exc)
+        return len(selected)
+
+    @staticmethod
+    def _terminal_telemetry_pending(exp: Mapping[str, Any]) -> bool:
+        """Return whether a terminal row has an explicit job-scoped final read pending."""
+        if not is_terminal_status(exp.get("status")):
+            return False
+        job_id = exp.get("job_id")
+        state = exp.get("terminal_telemetry")
+        return (
+            bool(job_id)
+            and isinstance(state, Mapping)
+            and str(state.get("job_id")) == str(job_id)
+            and state.get("finalized") is not True
         )
 
     def _poll_hpc(self, hpc_type: HPCType, jobids: List[str]) -> Dict[str, str]:
@@ -804,7 +1065,9 @@ class HPCOrchestrator:
                 break
             total_submitted += submitted_count
 
-            if total_submitted >= self.submission_checkpoint_size:
+            # A low-compute controller yields after one bounded burst. Accepted
+            # IDs are already durable, and concurrency includes those new jobs.
+            if getattr(self, "low_compute", False) or total_submitted >= self.submission_checkpoint_size:
                 break
 
             processed_commands = self._process_command_queue(exps)
@@ -839,9 +1102,7 @@ class HPCOrchestrator:
                 on_refresh(exps)
 
         if total_submitted:
-            logger.info(
-                "Submission fill phase accepted %d job(s); checkpointing the experiment ledger.", total_submitted
-            )
+            logger.info("Submission fill phase accepted %d job(s); submission receipts are durable.", total_submitted)
         return concurrency_used
 
     def _submit_pending_batch(
@@ -928,7 +1189,9 @@ class HPCOrchestrator:
     # -----------------------------------------------------------------
     # Helper: read remote status-file → enrich exp dict for dashboard
     # -----------------------------------------------------------------
-    def _update_running_experiment_info(self, exp: dict) -> Optional[dict]:
+    def _update_running_experiment_info(
+        self, exp: dict[str, Any], *, include_history: bool = True
+    ) -> Optional[dict[str, Any]]:
         context = StatusIngestContext(
             connection_manager=self.connection_manager,
             hpc_configs=HPC_CONFIGS,
@@ -936,6 +1199,7 @@ class HPCOrchestrator:
             save_yaml=self._save_yaml,
             projection_options=self.projection_options,
             persist_immediately=False,
+            include_history=include_history,
         )
         return update_running_experiment_info(exp, context)
 
@@ -1109,7 +1373,12 @@ class HPCOrchestrator:
             ExperimentStatus.PARTIAL,
             ExperimentStatus.KILLED,
         }
-        return all(e["status"] in terminal for e in exps)
+        all_terminal = all(e["status"] in terminal for e in exps)
+        if getattr(self, "low_compute", False):
+            # Bounded telemetry may need more than one cycle to collect the
+            # last metrics. Each row already has a finite final-read budget.
+            return all_terminal and not any(self._terminal_telemetry_pending(exp) for exp in exps)
+        return all_terminal
 
     # -------------------------------------------------------------------------
     # read/save YAML
@@ -1117,10 +1386,22 @@ class HPCOrchestrator:
     def _load_yaml(self) -> dict:
         """Load experiment YAML and ensure a dict with an 'experiments' list."""
         self.state_store.concurrency_limits = self.concurrency_limits
-        return self.state_store.load()
+        data = self.state_store.load()
+        metadata = data.get("metadata")
+        self.experiment_info = ExperimentInfo.from_metadata(metadata if isinstance(metadata, Mapping) else {})
+        return data
 
-    def _save_yaml(self, data: dict):
-        self.state_store.save(data)
+    def _save_yaml(self, data: dict[str, Any]) -> None:
+        checkpoint_data = data
+        if getattr(self, "high_volume_mode", False):
+            checkpoint_data = dict(data)
+            checkpoint_data["experiments"] = [
+                {key: value for key, value in exp.items() if key not in HIGH_VOLUME_TRANSIENT_HISTORY_FIELDS}
+                for exp in data.get("experiments", [])
+            ]
+        self.state_store.save(checkpoint_data)
+        if getattr(self, "high_volume_mode", False):
+            self._last_state_checkpoint_at = time.monotonic()
 
     def _replace_exp_in_list(self, exps: List[dict], new_e: dict) -> List[dict]:
         return replace_exp_in_list(exps, new_e)
@@ -1132,7 +1413,7 @@ class HPCOrchestrator:
         """Return True if running on the given HPC type."""
         return self.is_local_hpc_fn(hpc_type)
 
-    def _ensure_remote_dirs(self, hpc_type: HPCType):
+    def _ensure_remote_dirs(self, hpc_type: HPCType, *, data: Mapping[str, Any] | None = None) -> None:
         """
         Create HPC directories for logs/out on HPC side (mkdir -p) or locally if is_local_hpc.
         """
@@ -1155,7 +1436,8 @@ class HPCOrchestrator:
             basep / "logs",
         ]
         try:
-            data = self._load_yaml()
+            if data is None:
+                data = self._load_yaml()
             for exp in data.get("experiments", []):
                 subdirs.extend(resolve_extra_remote_dirs(exp, base_path=basep))
         except Exception as exc:

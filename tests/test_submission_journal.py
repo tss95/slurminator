@@ -92,7 +92,7 @@ def test_failed_checkpoint_fsync_retains_submission_journal(tmp_path, monkeypatc
     assert checkpoint["experiments"][0]["job_id"] == "12345"
 
 
-def test_load_replays_receipt_idempotently_without_regressing_terminal_status(tmp_path) -> None:
+def test_load_replays_receipt_in_memory_without_regressing_or_eagerly_compacting(tmp_path) -> None:
     ledger_path = tmp_path / "experiments.yaml"
     terminal_row = {**_accepted_row(), "status": ExperimentStatus.COMPLETED, "completed_timestamp": 1_700_000_100.0}
     dump_yaml({"experiments": [terminal_row]}, ledger_path)
@@ -104,8 +104,12 @@ def test_load_replays_receipt_idempotently_without_regressing_terminal_status(tm
     loaded_row = loaded["experiments"][0]
     assert loaded_row["status"] == ExperimentStatus.COMPLETED
     assert loaded_row["completed_timestamp"] == 1_700_000_100.0
-    assert not store.submission_journal.path.exists()
+    assert store.submission_journal.path.exists()
     assert store.load()["experiments"][0]["status"] == ExperimentStatus.COMPLETED
+
+    store.save(loaded)
+
+    assert not store.submission_journal.path.exists()
 
 
 def test_apply_is_idempotent_for_the_same_receipt(tmp_path) -> None:
@@ -181,7 +185,7 @@ def test_missing_ledger_with_receipts_fails_instead_of_discarding_state(tmp_path
     store = ExperimentStateStore(ledger_path, {HPCType.OLIVIA: 1})
     store.record_submission(_accepted_row())
 
-    with pytest.raises(FileNotFoundError, match="durable submission receipts remain"):
+    with pytest.raises(FileNotFoundError, match="durable journal state remains"):
         store.load()
 
     assert store.submission_journal.path.exists()

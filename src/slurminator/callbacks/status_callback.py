@@ -148,6 +148,17 @@ class OrchestratorStatusCallback:
 
         previous_status = self._state or self._read_existing_state()
         if previous_status is not None and not can_transition(previous_status, next_status):
+            if next_status == "initializing":
+                # A fresh process announcing itself after the persisted status already
+                # reached 'running'/'completed' is benign, not a protocol violation:
+                # it happens on slurm requeues, orchestrator retries (the status file
+                # survives across attempts), OOM auto-retries re-entering
+                # on_train_start, and early update_metrics writes racing
+                # on_train_start. Keep the more advanced status and skip the write
+                # instead of crashing the run at its first callback (2026-08-31;
+                # previously every queued retry died deterministically at t=0).
+                self._state = previous_status
+                return False
             raise ValueError(f"Invalid orchestrator status transition: {previous_status} -> {next_status}")
 
         now = float(self._time_fn())

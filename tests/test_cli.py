@@ -6,9 +6,39 @@ import pytest
 
 from slurminator.cli import discover_plugin, parse_partition_overrides, run_orchestrator_cli
 from slurminator.config import HPCClusterConfig, HPCPartition, HPCType
+from slurminator.experiments.yaml_utils import dump_yaml, load_yaml
 from slurminator.plugins import SimpleCommandPlugin
 
 pytestmark = pytest.mark.unit
+
+
+def test_cli_sweepfile_preserves_experiment_info(monkeypatch, tmp_path: Path, capsys) -> None:
+    monkeypatch.delenv("SLURMINATOR_PLUGIN", raising=False)
+    monkeypatch.chdir(tmp_path)
+    sweep_file = tmp_path / "sweep.yaml"
+    info = {
+        "experiment_name": "Optimizer comparison",
+        "experiment_description": "Compare two optimizers on a synthetic dataset.\nUse one seed per optimizer.",
+    }
+    dump_yaml(
+        {
+            **info,
+            "custom_sweeps": [
+                {"datasets": ["synthetic"], "seeds": [42], "sweep_keys": {"optimizer.name": ["adamw", "sgd"]}}
+            ],
+        },
+        sweep_file,
+    )
+
+    run_orchestrator_cli(
+        argv=["--sweepfile", str(sweep_file), "--dry-run"], launch_guard=lambda: None, load_configs=False
+    )
+
+    [ledger] = (tmp_path / "experiment_lists").glob("experiments_*.yaml")
+    data = load_yaml(ledger)
+    assert {key: data["metadata"][key] for key in info} == info
+    assert len(data["experiments"]) == 2
+    assert f"DRY RUN COMPLETE: {ledger}" in capsys.readouterr().out
 
 
 def _olivia_config() -> HPCClusterConfig:
@@ -96,6 +126,121 @@ def test_cli_constructs_orchestrator_with_simple_command_plugin(monkeypatch, tmp
     assert captured["plugin"].config_arg == "--config"
     assert captured["plugin"].sweep_params_arg == "--overrides"
     assert captured["ran"] is True
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected_poll", "low_compute"),
+    [
+        ([], 2, False),
+        (["--low-compute"], 60, True),
+        (["--low-compute", "--poll-interval", "5"], 60, True),
+        (["--low-compute", "--poll-interval", "120"], 120, True),
+        (["--poll-interval", "5"], 5, False),
+    ],
+)
+def test_cli_low_compute_preset(
+    monkeypatch, tmp_path: Path, flags: list[str], expected_poll: int, low_compute: bool
+) -> None:
+    monkeypatch.delenv("SLURMINATOR_PLUGIN", raising=False)
+    exp_file = tmp_path / "exps.yaml"
+    exp_file.write_text("experiments: []\n")
+    captured = {}
+
+    class FakeOrchestrator:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def run(self):
+            captured["ran"] = True
+
+    run_orchestrator_cli(
+        argv=["--yaml", str(exp_file), *flags],
+        launch_guard=lambda: None,
+        load_configs=False,
+        orchestrator_cls=FakeOrchestrator,
+    )
+
+    assert captured["poll_interval"] == expected_poll
+    assert captured.get("low_compute", False) is low_compute
+    if not low_compute:
+        assert "low_compute" not in captured  # Preserve the existing plugin constructor contract.
+    assert captured["ran"] is True
+
+
+@pytest.mark.parametrize("poll_interval", ["0", "-1"])
+def test_cli_low_compute_rejects_invalid_interval_before_connections(monkeypatch, poll_interval: str) -> None:
+    monkeypatch.delenv("SLURMINATOR_PLUGIN", raising=False)
+    with pytest.raises(SystemExit) as exc:
+        run_orchestrator_cli(
+            argv=["--yaml", "unused.yaml", "--low-compute", "--poll-interval", poll_interval],
+            launch_guard=lambda: pytest.fail("invalid options must fail before startup"),
+            load_configs=False,
+        )
+    assert exc.value.code == 2
+
+
+def test_cli_low_compute_dry_run_never_starts_controller(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("SLURMINATOR_PLUGIN", raising=False)
+    exp_file = tmp_path / "exps.yaml"
+    exp_file.write_text("experiments: []\n")
+
+    class UnexpectedOrchestrator:
+        def __init__(self, **kwargs):
+            pytest.fail("dry-run must not start the controller")
+
+    run_orchestrator_cli(
+        argv=["--yaml", str(exp_file), "--low-compute", "--dry-run"],
+        launch_guard=lambda: None,
+        load_configs=False,
+        orchestrator_cls=UnexpectedOrchestrator,
+    )
+
+
+@pytest.mark.parametrize("generate", [False, True])
+def test_cli_dry_run_ends_with_experiment_yaml_reference(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], generate: bool
+) -> None:
+    """Dry-run references identify the resolved ledger, including generated paths."""
+    monkeypatch.delenv("SLURMINATOR_PLUGIN", raising=False)
+    monkeypatch.chdir(tmp_path)
+    exp_file = Path("experiment lists") / "experiments_20260911_163454.yaml"
+    exp_file.parent.mkdir()
+    exp_file.write_text("experiments: []\n")
+
+    class UnexpectedOrchestrator:
+        def __init__(self, **kwargs: object) -> None:
+            pytest.fail("dry-run must not start the controller")
+
+    flags = ["--sweepfile", "sweep.yaml"] if generate else ["--yaml", str(exp_file)]
+    run_orchestrator_cli(
+        argv=[*flags, "--dry-run"],
+        launch_guard=lambda: None,
+        load_configs=False,
+        experiment_generator=lambda _args: str(exp_file),
+        orchestrator_cls=UnexpectedOrchestrator,
+    )
+
+    output = capsys.readouterr().out
+    assert output.splitlines()[-1] == f"DRY RUN COMPLETE: {exp_file.resolve()}"
+    assert "EXPERIMENT COMPLETE:" not in output
+
+
+def test_cli_low_compute_rejects_plugin_sweep_runner(monkeypatch) -> None:
+    monkeypatch.delenv("SLURMINATOR_PLUGIN", raising=False)
+
+    def extend_parser(parser):
+        parser.add_argument("--wandb-sweep")
+        return parser
+
+    with pytest.raises(SystemExit) as exc:
+        run_orchestrator_cli(
+            argv=["--wandb-sweep", "example", "--low-compute"],
+            parser_extender=extend_parser,
+            launch_guard=lambda: pytest.fail("unsupported mode must fail before startup"),
+            load_configs=False,
+            sweep_mode_runner=lambda *_args: pytest.fail("unsupported runner must not start"),
+        )
+    assert exc.value.code == 2
 
 
 def test_cli_uses_orchestrator_config_simple_command_defaults(monkeypatch, tmp_path: Path) -> None:

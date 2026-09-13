@@ -60,6 +60,7 @@ def maybe_reassign_experiments(
         return
 
     free_hpcs.sort(key=lambda item: item[1], reverse=True)
+    reassigned = False
 
     for busy_hpc in overloaded_hpcs:
         queued_exps = [
@@ -108,8 +109,10 @@ def maybe_reassign_experiments(
                     break
 
             data["experiments"] = context.replace_exp_in_list(data["experiments"], exp)
+            reassigned = True
 
-    context.save_yaml(data)
+    if reassigned:
+        context.save_yaml(data)
 
 
 __all__ = ["ReassignmentContext", "maybe_reassign_experiments"]

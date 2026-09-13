@@ -67,6 +67,10 @@ Partition overrides:
 ## Runtime Behavior
 
 - `--poll-interval SECONDS`: scheduler polling interval. Default: `2`.
+- `--low-compute`: opt-in controller preset for shared login nodes. Enforces a
+  minimum 60-second poll interval and reduces telemetry, submission, persistence,
+  and automatic log reads while preserving the selected dashboard. See the preset
+  details below.
 - `--dashboard-ui v2|v3|v4`: dashboard implementation. If omitted,
   `orchestrator_config.yaml` may set `dashboard.ui_version`; otherwise the
   package default is `v4`. Use `--dashboard-ui v3` for the legacy Rich
@@ -75,6 +79,66 @@ Partition overrides:
 - `--debug`: enable debug mode.
 - `--no-prog`: reserved compatibility flag; currently ignored by the generic
   orchestrator.
+
+### Final experiment reference
+
+After the dashboard and HPC connections close, the final line identifies the
+experiment-state YAML for copying into agent prompts or a later `--yaml` command:
+
+```text
+EXPERIMENT COMPLETE: /path/to/experiment_lists/experiments_20260911_163454.yaml
+```
+
+The reference is an absolute path, printed as plain text without log prefixes,
+color, or wrapping, even when INFO logging is disabled. `COMPLETE` means the
+orchestrator reached its normal completion condition; individual rows can still
+have failed. Quitting the dashboard or interrupting an unfinished run prints
+`EXPERIMENT STOPPED: <path>`. A dry run ends with `DRY RUN COMPLETE: <path>`, using
+the generated experiment YAML when `--sweepfile` was provided. Exceptions still
+propagate without a completion marker.
+
+### Low-compute preset
+
+Add `--low-compute` to an existing `--yaml` or `--sweepfile` command:
+
+```bash
+slurminator --yaml experiment_lists/small.yaml --olivia-limit 4 --low-compute
+```
+
+Polling alone does not control all controller work: submission bursts and YAML
+checkpoints normally trigger additional scheduler queries, and an open log view
+reads files independently. This preset applies the following limits:
+
+| Activity | With `--low-compute` |
+| --- | --- |
+| Scheduler | At least 60 seconds between normal cycles; batched queries per cluster. No extra queries between submission bursts or after checkpoints. |
+| Telemetry | At most 32 active/pending-final status files per cycle, rotating fairly; at least 60 seconds between reads. No automatic metric-history loading. |
+| Submissions | One bounded batch per cycle, up to 8 accepted jobs and the existing 2-second batch time budget. A synchronous submission is allowed to finish. |
+| Persistence | Keep the ledger in memory, including for small sweeps. Periodic full YAML checkpoints at least 300 seconds apart; submission receipts and scheduler transitions remain durable immediately. Operator commands, retry decisions, and shutdown still checkpoint when required. |
+| Dashboard | Preserve the selected UI, including interactive v4. Its home screen checks cached snapshot versions and skips unchanged data; navigation remains responsive. |
+| Log view | Read once when opened, then tail automatically at the controller poll interval (at least 60 seconds), preserving a slower configured UI interval. Manual refresh remains immediate. |
+| Completion | Exit after all rows are terminal and outstanding final status reads finish or exhaust their existing retry budget. |
+
+`--low-compute --poll-interval 120` uses a 120-second cycle. Shorter positive
+values are raised to 60 seconds; nonpositive values are rejected. More
+conservative programmatic telemetry/checkpoint limits are retained. The flag
+affects the controller; submitted jobs keep their resource requests and training
+environment.
+
+Expect slower status updates, submission ramp-up, and final-metric collection.
+Opening detail/plot screens or explicitly refreshing them can load a run's history
+on demand. Use one controller per ledger, and stop it before editing the YAML
+because this mode keeps active state in memory. Omit the flag on restart to
+restore normal behavior. Plugin-specific
+W&B sweep runners do not implement this preset and reject the combination.
+
+This preset targets recurring scheduler and shared-filesystem work. Dashboard
+and SSH threads remain available; it does not impose an OS CPU/thread limit.
+Cached screen refreshes do not reload the experiment YAML or ingest status files;
+quota queries retain their existing five-minute cache. Reducing repeated file
+reads and writes follows
+[NRIS login-node guidance](https://documentation.sigma2.no/jobs/node-types.html)
+and [Slurm's warning about excessive scheduler RPCs](https://slurm.schedmd.com/squeue.html#SECTION_PERFORMANCE).
 
 ## Config Discovery
 
