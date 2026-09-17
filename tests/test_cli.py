@@ -75,12 +75,20 @@ def test_cli_bootstraps_connection_manager_for_active_limit(tmp_path: Path) -> N
         def run_command(self, _hpc, _cmd, prefer_remote=False):  # noqa: ARG002
             return ("", "")
 
+    class FakeOrchestrator:
+        def __init__(self, **kwargs):
+            captured["controller_connection"] = kwargs["connection_manager"]
+
+        def run(self):
+            pass
+
     run_orchestrator_cli(
-        argv=["--yaml", str(exp_file), "--dry-run", "--olivia-limit", "1"],
+        argv=["--yaml", str(exp_file), "--olivia-limit", "1"],
         launch_guard=lambda: None,
         load_configs=False,
         cluster_configs={HPCType.OLIVIA: _olivia_config()},
         connection_manager_cls=FakeConnectionManager,
+        orchestrator_cls=FakeOrchestrator,
     )
 
     cfg = captured["cfgs"][HPCType.OLIVIA]
@@ -90,6 +98,76 @@ def test_cli_bootstraps_connection_manager_for_active_limit(tmp_path: Path) -> N
     assert cfg.submission_use_key is False
     assert cfg.submission_key_path == "~/.ssh/submit"
     assert cfg.submission_two_factor is False
+    assert isinstance(captured["controller_connection"], FakeConnectionManager)
+
+
+@pytest.mark.parametrize("generate", [False, True])
+def test_dry_run_skips_gpu_guard_connections_and_controller(monkeypatch, tmp_path: Path, generate: bool) -> None:
+    """Nonzero cluster limits do not turn local planning into a controller launch."""
+    monkeypatch.delenv("SLURMINATOR_PLUGIN", raising=False)
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "input.yaml"
+    if generate:
+        dump_yaml({"custom_sweeps": [{"datasets": ["synthetic"], "seeds": [42]}]}, source)
+    else:
+        source.write_text("experiments: []\n")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("dry-run entered a controller-only path")
+
+    run_orchestrator_cli(
+        argv=["--sweepfile" if generate else "--yaml", str(source), "--olivia-limit", "1", "--dry-run"],
+        load_configs=False,
+        launch_guard=forbidden,
+        connection_manager_cls=forbidden,
+        orchestrator_cls=forbidden,
+    )
+    if generate:
+        [ledger] = (tmp_path / "experiment_lists").glob("*.yaml")
+        assert len(load_yaml(ledger)["experiments"]) == 1
+
+
+def test_dry_run_rejects_live_sweep_runner_before_connections(monkeypatch) -> None:
+    """Plugins must convert dry-runs into local input instead of creating live sweeps."""
+    monkeypatch.delenv("SLURMINATOR_PLUGIN", raising=False)
+
+    def extend_parser(parser):
+        parser.add_argument("--wandb-sweep", nargs="?", const="")
+        return parser
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("dry-run attempted a live sweep or controller operation")
+
+    with pytest.raises(SystemExit) as exc:
+        run_orchestrator_cli(
+            argv=["--wandb-sweep", "--olivia-limit", "1", "--dry-run"],
+            parser_extender=extend_parser,
+            load_configs=False,
+            launch_guard=forbidden,
+            connection_manager_cls=forbidden,
+            sweep_mode_runner=forbidden,
+        )
+    assert exc.value.code == 2
+
+
+def test_live_controller_still_respects_gpu_guard(monkeypatch, tmp_path: Path) -> None:
+    """The dry-run exception does not relax the production controller guard."""
+    monkeypatch.delenv("SLURMINATOR_PLUGIN", raising=False)
+    import slurminator.launch_guard as guard
+
+    monkeypatch.setattr(guard, "determine_current_hpc", lambda: HPCType.OLIVIA)
+    monkeypatch.setattr(guard, "_is_cuda_available", lambda: True)
+    ledger = tmp_path / "ledger.yaml"
+    ledger.write_text("experiments: []\n")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("blocked production launch created a connection")
+
+    with pytest.raises(SystemExit) as exc:
+        run_orchestrator_cli(
+            argv=["--yaml", str(ledger), "--olivia-limit", "1"], load_configs=False, connection_manager_cls=forbidden
+        )
+    assert exc.value.code == 2
 
 
 def test_cli_constructs_orchestrator_with_simple_command_plugin(monkeypatch, tmp_path: Path) -> None:

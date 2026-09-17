@@ -106,7 +106,9 @@ def build_base_parser() -> argparse.ArgumentParser:
         default=None,
         help="Select dashboard UI version. Default: orchestrator config value, otherwise v4.",
     )
-    parser.add_argument("--dry-run", action="store_true", help="Generate/validate and exit without launching jobs.")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Resolve/generate local experiment YAML without connections or jobs."
+    )
     parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
     parser.add_argument("--no-prog", action="store_true", help="Reserved compatibility flag; ignored by orchestrator.")
 
@@ -200,6 +202,20 @@ def run_orchestrator_cli(
             repo_root=repo_root,
         )
 
+    # Local planning must work inside CPU/GPU containers without Slurm or SSH.
+    # Handle it before controller guards, connection bootstrap, and plugin runners.
+    if args.dry_run:
+        if getattr(args, "wandb_sweep", None) is not None:
+            parser.error("--dry-run requires --yaml or --sweepfile; it cannot start a live sweep runner")
+        if experiment_generator is None and discovered_plugin is not None:
+            experiment_generator = _get_optional_hook(discovered_plugin, "generate_experiment_yaml")
+        experiment_file = _resolve_experiment_file(args, experiment_generator=experiment_generator)
+        if not Path(experiment_file).is_file():
+            raise SystemExit(f"Experiment file not found: {experiment_file}")
+        logger.info("Dry run enabled - not launching HPC orchestrator.")
+        print(f"DRY RUN COMPLETE: {Path(experiment_file).resolve()}", flush=True)
+        return
+
     if launch_guard is get_orchestrator_gpu_hpc_launch_block_message and discovered_plugin is not None:
         launch_guard = _get_optional_hook(discovered_plugin, "launch_guard") or launch_guard
     if launch_guard is not None:
@@ -233,11 +249,6 @@ def run_orchestrator_cli(
     experiment_file = _resolve_experiment_file(args, experiment_generator=experiment_generator)
     if not Path(experiment_file).exists():
         raise SystemExit(f"Experiment file not found: {experiment_file}")
-
-    if args.dry_run:
-        logger.info("Dry run enabled - not launching HPC orchestrator.")
-        print(f"DRY RUN COMPLETE: {Path(experiment_file).resolve()}", flush=True)
-        return
 
     if plugin_factory is not None:
         plugin = plugin_factory(args)

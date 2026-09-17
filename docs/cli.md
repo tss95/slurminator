@@ -75,7 +75,13 @@ Partition overrides:
   `orchestrator_config.yaml` may set `dashboard.ui_version`; otherwise the
   package default is `v4`. Use `--dashboard-ui v3` for the legacy Rich
   dashboard.
-- `--dry-run`: generate and validate inputs, then exit without launching jobs.
+- `--dry-run`: resolve local YAML inputs or generate a ledger, then exit without
+  controller startup, SSH connections, scheduler access, or live sweep runners.
+  It is supported on CPU and GPU nodes, including containers without Slurm
+  clients. Existing `--yaml` inputs are checked for file existence; this mode
+  does not run training or the controller's full preflight. A plugin must convert
+  sweep-runner dry-runs into local inputs; unsupported live sweep runners are
+  rejected before any connection is created.
 - `--debug`: enable debug mode.
 - `--no-prog`: reserved compatibility flag; currently ignored by the generic
   orchestrator.
