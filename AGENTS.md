@@ -1,5 +1,13 @@
 # Agent Instructions
 
+## Experiment Results
+
+For run progress, metric extraction, seed summaries, and observed best/last
+histories, start with `python -m slurminator.results inspect <ledger.yaml>` and
+the [results skill](skills/slurminator-results/SKILL.md) before writing another
+YAML parser. The [query guide](docs/result_analysis.md) documents the available
+commands. Keep protocol-specific artifact audits separate from ledger summaries.
+
 ## Experiment Config Context
 
 When creating or materially revising experiment/sweep configs, populate the

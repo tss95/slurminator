@@ -36,6 +36,7 @@ dev = [
 
 [project.scripts]
 slurminator = "slurminator.cli:main"
+slurminator-results = "slurminator.results:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

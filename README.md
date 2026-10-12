@@ -96,6 +96,12 @@ If the console script is not on `PATH`, use `python -m slurminator`.
 See [docs/cli.md](docs/cli.md) for the full built-in CLI reference and plugin
 extension hooks.
 
+For compact, read-only status and result summaries, use
+`python -m slurminator.results inspect path/to/experiments.yaml`. The
+[result query guide](docs/result_analysis.md) covers metric exports, seed
+summaries, and observed history queries; an accompanying
+[agent skill](skills/slurminator-results/SKILL.md) avoids repeated parsing scripts.
+
 ## Quickstart
 
 Create a user config:
