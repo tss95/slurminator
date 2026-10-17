@@ -4,7 +4,7 @@ import logging
 import math
 import os
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Type
 
@@ -67,6 +67,9 @@ LOW_COMPUTE_CHECKPOINT_INTERVAL_SECONDS = 300.0
 LOW_COMPUTE_TELEMETRY_BATCH_SIZE = 32
 LOW_COMPUTE_SUBMISSION_BATCH_SIZE = 8
 LOW_COMPUTE_SUBMISSION_BATCH_SECONDS = 2.0
+LOW_COMPUTE_SUBMISSION_FILL_SIZE = 32
+LOW_COMPUTE_SUBMISSION_FILL_SECONDS = 30.0
+LOW_COMPUTE_SUBMISSION_PAUSE_SECONDS_PER_JOB = 1.0
 HIGH_VOLUME_TRANSIENT_HISTORY_FIELDS = frozenset(
     {"history", "history_last_read_offset", "history_attempt_max", "history_truncated"}
 )
@@ -189,11 +192,12 @@ class HPCOrchestrator:
             self.submission_batch_seconds = min(self.submission_batch_seconds, LOW_COMPUTE_SUBMISSION_BATCH_SECONDS)
             logger.info(
                 "Low-compute mode: scheduler/telemetry intervals >= %ss, YAML checkpoints >= %ss, "
-                "at most %d status reads and one submission batch (up to %d jobs) per cycle.",
+                "at most %d status reads and paced submission batches (up to %d jobs / %.0fs) per cycle.",
                 self.poll_interval,
                 self.state_checkpoint_interval_seconds,
                 self.telemetry_batch_size,
-                self.submission_batch_size,
+                min(self.submission_checkpoint_size, LOW_COMPUTE_SUBMISSION_FILL_SIZE),
+                LOW_COMPUTE_SUBMISSION_FILL_SECONDS,
             )
         self.max_unqueue_seconds = max_unqueue_seconds
 
@@ -1048,27 +1052,61 @@ class HPCOrchestrator:
         method therefore checkpoints the large YAML ledger only after a group
         of small submission bursts, while polling Slurm and processing operator
         commands between bursts. Full status-file ingestion remains in the
-        outer maintenance loop.
+        outer maintenance loop. Low-compute fills reuse cached concurrency and
+        yield between batches instead of issuing extra scheduler queries. Their
+        count/time bounds keep submission work finite even for large ledgers.
         """
         total_submitted = 0
         concurrency_used = self._count_concurrency(exps)
+        low_compute = getattr(self, "low_compute", False)
+        submission_limit = self.submission_checkpoint_size
+        fill_deadline = None
+        if low_compute:
+            submission_limit = min(submission_limit, LOW_COMPUTE_SUBMISSION_FILL_SIZE)
+            fill_deadline = time.monotonic() + LOW_COMPUTE_SUBMISSION_FILL_SECONDS
+        # Cached low-compute state cannot free capacity between batches. Walk
+        # the ledger once, avoiding repeated scans and retries of failed rows.
+        submission_candidates = iter(exps) if low_compute else exps
 
-        while total_submitted < self.submission_checkpoint_size:
-            if self.submissions_paused or (should_stop is not None and should_stop()):
+        def should_yield() -> bool:
+            return (fill_deadline is not None and time.monotonic() >= fill_deadline) or (
+                should_stop is not None and should_stop()
+            )
+
+        while total_submitted < submission_limit:
+            if self.submissions_paused or should_yield():
                 break
 
-            remaining_before_checkpoint = self.submission_checkpoint_size - total_submitted
+            remaining_before_checkpoint = submission_limit - total_submitted
             submitted_count = self._submit_pending_batch(
-                exps, concurrency_used, data, max_submissions=remaining_before_checkpoint
+                submission_candidates,
+                concurrency_used,
+                data,
+                max_submissions=remaining_before_checkpoint,
+                should_stop=should_yield,
             )
             if submitted_count == 0:
                 break
             total_submitted += submitted_count
 
-            # A low-compute controller yields after one bounded burst. Accepted
-            # IDs are already durable, and concurrency includes those new jobs.
-            if getattr(self, "low_compute", False) or total_submitted >= self.submission_checkpoint_size:
+            if total_submitted >= submission_limit:
                 break
+            if low_compute and not any(
+                concurrency_used.get(hpc, 0) < limit for hpc, limit in self.concurrency_limits.items()
+            ):
+                break
+
+            if fill_deadline is not None:
+                # Keep the existing small bursts, with a cooldown proportional
+                # to accepted jobs. This is burst pacing, not an sbatch RPC rate
+                # limit: failed attempts do not count as accepted submissions.
+                resume_at = min(
+                    time.monotonic() + submitted_count * LOW_COMPUTE_SUBMISSION_PAUSE_SECONDS_PER_JOB, fill_deadline
+                )
+                while time.monotonic() < resume_at:
+                    if self.submissions_paused or (should_stop is not None and should_stop()):
+                        break
+                    time.sleep(min(0.2, max(0.0, resume_at - time.monotonic())))
 
             processed_commands = self._process_command_queue(exps)
             if processed_commands:
@@ -1079,6 +1117,14 @@ class HPCOrchestrator:
                 if on_refresh is not None:
                     on_refresh(exps)
                 break
+
+            if low_compute:
+                # Accepted receipts already account for new jobs. Jobs that
+                # finish before the next scheduled poll only make this cached
+                # count conservative. Recount after possible operator commands.
+                if processed_commands:
+                    concurrency_used = self._count_concurrency(exps)
+                continue
 
             active_before_refresh = {
                 str(exp.get("experiment_id"))
@@ -1107,11 +1153,12 @@ class HPCOrchestrator:
 
     def _submit_pending_batch(
         self,
-        exps: list[dict[str, Any]],
+        exps: Iterable[dict[str, Any]],
         concurrency_used: dict[HPCType, int],
         data: dict[str, Any],
         *,
         max_submissions: int | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> int:
         """Submit at most one bounded batch and return its successful submission count.
 
@@ -1129,7 +1176,7 @@ class HPCOrchestrator:
 
         batch_started_at = time.monotonic()
         for exp in exps:
-            if self.submissions_paused:
+            if self.submissions_paused or (should_stop is not None and should_stop()):
                 break
             if self._maybe_submit(exp, concurrency_used, data):
                 submitted_count += 1

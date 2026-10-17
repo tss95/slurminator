@@ -119,7 +119,7 @@ reads files independently. This preset applies the following limits:
 | --- | --- |
 | Scheduler | At least 60 seconds between normal cycles; batched queries per cluster. No extra queries between submission bursts or after checkpoints. |
 | Telemetry | At most 32 active/pending-final status files per cycle, rotating fairly; at least 60 seconds between reads. No automatic metric-history loading. |
-| Submissions | One bounded batch per cycle, up to 8 accepted jobs and the existing 2-second batch time budget. A synchronous submission is allowed to finish. |
+| Submissions | Several paced batches per cycle, each capped at 8 accepted jobs and a 2-second time budget. The full fill phase accepts at most 32 jobs within a 30-second budget, checked before each attempt. A synchronous submission is allowed to finish. |
 | Persistence | Keep the ledger in memory, including for small sweeps. Periodic full YAML checkpoints at least 300 seconds apart; submission receipts and scheduler transitions remain durable immediately. Operator commands, retry decisions, and shutdown still checkpoint when required. |
 | Dashboard | Preserve the selected UI, including interactive v4. Its home screen checks cached snapshot versions and skips unchanged data; navigation remains responsive. |
 | Log view | Read once when opened, then tail automatically at the controller poll interval (at least 60 seconds), preserving a slower configured UI interval. Manual refresh remains immediate. |
@@ -127,11 +127,23 @@ reads files independently. This preset applies the following limits:
 
 `--low-compute --poll-interval 120` uses a 120-second cycle. Shorter positive
 values are raised to 60 seconds; nonpositive values are rejected. More
-conservative programmatic telemetry/checkpoint limits are retained. The flag
+conservative programmatic submission/telemetry/checkpoint limits are retained;
+the fill count is also capped by `submission_checkpoint_size`. The flag
 affects the controller; submitted jobs keep their resource requests and training
 environment.
 
-Expect slower status updates, submission ramp-up, and final-metric collection.
+The controller can continue queueing after a 2-second batch without waiting for
+the next 60-second monitoring cycle. Before another batch, it waits one second
+per job accepted in the preceding batch, up to eight seconds, checking pause/exit
+during the wait. Operator commands are processed between batches. Accepted jobs
+immediately consume concurrency slots and have durable submission receipts;
+these extra batches do not trigger scheduler queries, telemetry reads, or routine
+YAML checkpoints. Each row is considered once per fill, so failed submissions
+are not retried within that fill. This paces accepted-job bursts; failed attempts
+do not count toward the cooldown, so it is not a strict scheduler RPC rate limit.
+
+Submission ramp-up remains bounded, while status updates, automatic log reads,
+and final-metric collection retain their slower monitoring cadence.
 Opening detail/plot screens or explicitly refreshing them can load a run's history
 on demand. Use one controller per ledger, and stop it before editing the YAML
 because this mode keeps active state in memory. Omit the flag on restart to

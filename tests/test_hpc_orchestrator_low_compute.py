@@ -10,6 +10,7 @@ from unittest.mock import Mock
 import pytest
 
 import slurminator.hpc_orchestrator as orchestrator_module
+import slurminator.submission as submission_module
 from slurminator.config import HPCType
 from slurminator.experiments import ExperimentStatus
 from slurminator.hpc_orchestrator import HPCOrchestrator
@@ -118,27 +119,196 @@ def test_low_compute_checkpoints_without_an_extra_scheduler_query(tmp_path: Path
     save.assert_called_once_with(data)
 
 
-def test_low_compute_yields_after_one_submission_burst(tmp_path: Path, monkeypatch) -> None:
-    orchestrator = _orchestrator(tmp_path, low_compute=True, submission_batch_size=100, submission_batch_seconds=30.0)
-    assert orchestrator.submission_batch_seconds == 2.0
-    data = {"experiments": [{"experiment_id": str(i), "status": ExperimentStatus.PENDING} for i in range(20)]}
-    monkeypatch.setattr(orchestrator_module.time, "monotonic", lambda: 0.0)
+def _submission_fill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, submission_seconds: float = 0.0, **kwargs
+) -> SimpleNamespace:
+    """Fake scheduler latency while retaining concurrency accounting and durable receipts."""
+    orchestrator = _orchestrator(tmp_path, low_compute=True, **kwargs)
+    data = {"experiments": [{"experiment_id": str(i), "status": ExperimentStatus.PENDING} for i in range(40)]}
+    now = [0.0]
+    starts = []
+    monkeypatch.setattr(orchestrator_module.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(orchestrator_module.time, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
+    monkeypatch.setattr(submission_module, "capture_provenance", lambda: {"project": "a" * 40})
 
-    def submit(exp, usage, _data):
-        exp.update(status=ExperimentStatus.QUEUED, hpc_assignment=HPCType.OLIVIA)
-        usage[HPCType.OLIVIA] += 1
-        return True
+    def submit(_exp, _hpc):
+        starts.append(now[0])
+        now[0] += submission_seconds
+        return str(1000 + len(starts))
 
-    monkeypatch.setattr(orchestrator, "_maybe_submit", submit)
+    submit_mock = Mock(side_effect=submit)
+    commands = Mock(return_value=0)
+    monkeypatch.setattr(orchestrator, "_submit_experiment_universal", submit_mock)
+    monkeypatch.setattr(orchestrator, "_process_command_queue", commands)
     monkeypatch.setattr(orchestrator, "_refresh_scheduler_statuses", lambda _exps: pytest.fail("extra scheduler poll"))
+    monkeypatch.setattr(
+        orchestrator, "_update_running_experiment_info", lambda *_args, **_kwargs: pytest.fail("extra telemetry read")
+    )
     monkeypatch.setattr(
         orchestrator, "_save_yaml", lambda _data: pytest.fail("accepted receipts suffice between checkpoints")
     )
+    return SimpleNamespace(
+        orchestrator=orchestrator, data=data, now=now, starts=starts, submit=submit_mock, commands=commands
+    )
 
-    usage = orchestrator._fill_available_capacity(data["experiments"], data)
+
+@pytest.mark.parametrize("checkpoint_size, expected", [(100, 32), (11, 11)])
+def test_low_compute_fills_multiple_paced_batches_with_durable_receipts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpoint_size: int, expected: int
+) -> None:
+    fill = _submission_fill(
+        tmp_path,
+        monkeypatch,
+        submission_batch_size=100,
+        submission_batch_seconds=30.0,
+        submission_checkpoint_size=checkpoint_size,
+    )
+    assert fill.orchestrator.submission_batch_size == 8
+    assert fill.orchestrator.submission_batch_seconds == 2.0
+
+    usage = fill.orchestrator._fill_available_capacity(fill.data["experiments"], fill.data)
+
+    assert usage[HPCType.OLIVIA] == expected
+    assert fill.starts == pytest.approx([float(index // 8 * 8) for index in range(expected)])
+    receipts = fill.orchestrator.state_store.submission_journal.read()
+    assert [receipt.experiment_id for receipt in receipts] == [str(index) for index in range(expected)]
+    assert all(receipt.git_sha_at_submission == {"project": "a" * 40} for receipt in receipts)
+    assert fill.commands.call_count == (expected - 1) // 8
+
+
+@pytest.mark.parametrize("submission_seconds, expected", [(3.0, 8), (0.9, 17)])
+def test_low_compute_slow_submissions_progress_until_fill_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, submission_seconds: float, expected: int
+) -> None:
+    fill = _submission_fill(tmp_path, monkeypatch, submission_seconds=submission_seconds)
+
+    usage = fill.orchestrator._fill_available_capacity(fill.data["experiments"], fill.data)
+
+    assert usage[HPCType.OLIVIA] == expected
+    assert len(fill.starts) == expected
+    assert all(start < 30.0 for start in fill.starts)
+    assert 30.0 <= fill.now[0] <= 30.0 + submission_seconds
+    assert len(fill.orchestrator.state_store.submission_journal.read()) == expected
+
+
+def test_low_compute_respects_cached_concurrency_across_batches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fill = _submission_fill(tmp_path, monkeypatch)
+    fill.orchestrator.concurrency_limits[HPCType.OLIVIA] = 11
+    for exp in fill.data["experiments"][:2]:
+        exp.update(
+            status=ExperimentStatus.RUNNING, hpc_assignment=HPCType.OLIVIA, job_id=f"existing-{exp['experiment_id']}"
+        )
+
+    usage = fill.orchestrator._fill_available_capacity(fill.data["experiments"], fill.data)
+
+    assert usage[HPCType.OLIVIA] == 11
+    assert fill.submit.call_count == 9
+    assert fill.now[0] == pytest.approx(8.0)
+    assert len(fill.orchestrator.state_store.submission_journal.read()) == 9
+
+
+def test_low_compute_stops_without_busy_retry_when_submission_makes_no_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fill = _submission_fill(tmp_path, monkeypatch)
+    fill.submit.side_effect = None
+    fill.submit.return_value = None
+
+    usage = fill.orchestrator._fill_available_capacity(fill.data["experiments"], fill.data)
+
+    assert usage[HPCType.OLIVIA] == 0
+    assert fill.submit.call_count == len(fill.data["experiments"])
+    assert fill.now[0] == 0.0
+    assert not fill.orchestrator.state_store.submission_journal.path.exists()
+    fill.commands.assert_not_called()
+
+
+def test_low_compute_attempts_failed_rows_only_once_per_fill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fill = _submission_fill(tmp_path, monkeypatch)
+    accept = fill.submit.side_effect
+
+    def mixed_result(exp, hpc):
+        job_id = accept(exp, hpc)
+        return job_id if int(exp["experiment_id"]) % 2 == 0 else None
+
+    fill.submit.side_effect = mixed_result
+
+    usage = fill.orchestrator._fill_available_capacity(fill.data["experiments"], fill.data)
+
+    assert usage[HPCType.OLIVIA] == 20
+    assert [call.args[0]["experiment_id"] for call in fill.submit.call_args_list] == [str(index) for index in range(40)]
+    assert len(fill.orchestrator.state_store.submission_journal.read()) == 20
+
+
+@pytest.mark.parametrize("signal", ["pause", "exit"])
+def test_low_compute_cooldown_responds_to_pause_and_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, signal: str
+) -> None:
+    fill = _submission_fill(tmp_path, monkeypatch)
+
+    def sleep(seconds):
+        fill.now[0] += seconds
+        if signal == "pause" and fill.now[0] >= 0.6:
+            fill.orchestrator.submissions_paused = True
+
+    monkeypatch.setattr(orchestrator_module.time, "sleep", sleep)
+    refresh = Mock()
+
+    usage = fill.orchestrator._fill_available_capacity(
+        fill.data["experiments"],
+        fill.data,
+        should_stop=lambda: signal == "exit" and fill.now[0] >= 0.6,
+        on_refresh=refresh,
+    )
 
     assert usage[HPCType.OLIVIA] == 8
-    assert sum(exp["status"] == ExperimentStatus.QUEUED for exp in data["experiments"]) == 8
+    assert fill.submit.call_count == 8
+    assert fill.now[0] == pytest.approx(0.6)
+    refresh.assert_called_once_with(fill.data["experiments"])
+
+
+def test_low_compute_processes_operator_commands_between_batches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fill = _submission_fill(tmp_path, monkeypatch)
+    save = Mock()
+    monkeypatch.setattr(fill.orchestrator, "_save_yaml", save)
+
+    def pause(_experiments):
+        fill.orchestrator.submissions_paused = True
+        return 1
+
+    fill.commands.side_effect = pause
+
+    usage = fill.orchestrator._fill_available_capacity(fill.data["experiments"], fill.data)
+
+    assert usage[HPCType.OLIVIA] == 8
+    assert fill.submit.call_count == 8
+    fill.commands.assert_called_once_with(fill.data["experiments"])
+    save.assert_called_once_with(fill.data)
+
+
+def test_low_compute_receipt_failure_prevents_further_submissions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fill = _submission_fill(tmp_path, monkeypatch)
+    record = fill.orchestrator.state_store.record_submission
+
+    def fail_second_receipt(exp, previous_job_id):
+        if exp["experiment_id"] == "1":
+            raise OSError("receipt fsync failed")
+        return record(exp, previous_job_id)
+
+    monkeypatch.setattr(fill.orchestrator.state_store, "record_submission", fail_second_receipt)
+
+    with pytest.raises(OSError, match="receipt fsync failed"):
+        fill.orchestrator._fill_available_capacity(fill.data["experiments"], fill.data)
+
+    assert fill.submit.call_count == 2
+    assert fill.data["experiments"][2]["status"] == ExperimentStatus.PENDING
+    assert len(fill.orchestrator.state_store.submission_journal.read()) == 1
 
 
 def test_low_compute_waits_for_bounded_final_telemetry(tmp_path: Path) -> None:
