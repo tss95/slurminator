@@ -27,6 +27,7 @@ from rich import box as _box  # type: ignore
 from slurminator.config import HPCType, HPC_CONFIGS
 from slurminator.experiments import ExperimentStatus
 from slurminator.experiments.yaml_utils import load_yaml
+from slurminator.progress import display_progress_fraction, overall_run_progress
 from slurminator.quota import QuotaProvider, QuotaSnapshot, get_quota_provider
 
 # ------------------------------------------------------------------
@@ -500,14 +501,7 @@ class TerminalDashboard:
     @staticmethod
     def _resolve_display_progress_fraction(exp: dict, *, allow_zero: bool = False) -> Optional[float]:
         """Return completion fraction using the dashboard row-display precedence."""
-        candidate_pairs = [("current_step", "max_steps"), ("current_epoch", "max_epochs")]
-        for current_key, max_key in candidate_pairs:
-            frac = TerminalDashboard._coerce_progress_fraction(
-                exp.get(current_key), exp.get(max_key), allow_zero=allow_zero
-            )
-            if frac is not None:
-                return frac
-        return None
+        return display_progress_fraction(exp, allow_zero=allow_zero)
 
     def _overall_run_progress(self, exps: List[dict]) -> tuple[float, int, float]:
         """Return aggregate progress as completed-equivalent runs, eligible runs, and fraction.
@@ -516,22 +510,7 @@ class TerminalDashboard:
         denominator and contribute zero progress. Completed runs contribute one
         full run even when old status files lack progress fields.
         """
-        eligible = [exp for exp in exps if exp.get("status") not in self._FAILED_STATES]
-        if not eligible:
-            return 0.0, 0, 0.0
-
-        progress_sum = 0.0
-        for exp in eligible:
-            status = exp.get("status")
-            if status == ExperimentStatus.COMPLETED:
-                progress_sum += 1.0
-                continue
-            if status in {ExperimentStatus.PENDING, ExperimentStatus.QUEUED}:
-                continue
-            progress_sum += self._resolve_display_progress_fraction(exp, allow_zero=True) or 0.0
-
-        progress_fraction = progress_sum / len(eligible)
-        return progress_sum, len(eligible), progress_fraction
+        return overall_run_progress(exps)
 
     def _resolve_requested_hours_for_risk(self, exp: dict) -> Optional[float]:
         """Resolve configured walltime for timeout risk estimation."""

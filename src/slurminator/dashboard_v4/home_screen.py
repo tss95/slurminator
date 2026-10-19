@@ -19,6 +19,7 @@ from slurminator.dashboard_v4.keystrokes import HOME_BINDINGS
 from slurminator.dashboard_v4.per_run_menu import PerRunMenuScreen
 from slurminator.dashboard_v4.widgets import ExperimentsTable, table_render_signature
 from slurminator.experiments import ExperimentStatus
+from slurminator.progress import display_progress_fraction, overall_run_progress
 from slurminator.quota import QuotaProvider, QuotaSnapshot, get_quota_provider
 
 logger = logging.getLogger("slurminator")
@@ -301,22 +302,7 @@ class HomeScreen(Screen[None]):
         return _format_duration(next_eta - now, show_days=(next_eta - now) >= 86400)
 
     def _overall_run_progress(self, experiments: list[dict[str, Any]]) -> tuple[float, int, float]:
-        eligible = [exp for exp in experiments if exp.get("status") not in FAILED_STATES]
-        if not eligible:
-            return 0.0, 0, 0.0
-
-        progress_sum = 0.0
-        for exp in eligible:
-            status = exp.get("status")
-            if status == ExperimentStatus.COMPLETED:
-                progress_sum += 1.0
-                continue
-            if status in {ExperimentStatus.PENDING, ExperimentStatus.QUEUED}:
-                continue
-            progress_sum += _resolve_display_progress_fraction(exp, allow_zero=True) or 0.0
-
-        fraction = progress_sum / len(eligible)
-        return progress_sum, len(eligible), fraction
+        return overall_run_progress(experiments)
 
     def _timeout_risk_counts(self, experiments: list[dict[str, Any]], *, now: float) -> tuple[int, int]:
         high = 0
@@ -758,11 +744,7 @@ def _resolve_progress_fraction(exp: dict[str, Any], *, allow_zero: bool = False)
 
 
 def _resolve_display_progress_fraction(exp: dict[str, Any], *, allow_zero: bool = False) -> float | None:
-    for current_key, max_key in (("current_step", "max_steps"), ("current_epoch", "max_epochs")):
-        fraction = _coerce_progress_fraction(exp.get(current_key), exp.get(max_key), allow_zero=allow_zero)
-        if fraction is not None:
-            return fraction
-    return None
+    return display_progress_fraction(exp, allow_zero=allow_zero)
 
 
 def _format_duration(seconds: float, show_days: bool = False) -> str:
