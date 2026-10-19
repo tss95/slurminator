@@ -81,6 +81,13 @@ Partition overrides:
   resource and scheduler settings remain in effect. See the
   [agent interface](agent.md) for read-only `status`, `wait`, and `prepare`
   commands and the required launch-approval workflow.
+- `--isolated-submission-env`: submit on the local cluster with a minimal sbatch
+  process environment. Explicit cluster exports remain, while controller Slurm,
+  scratch, cache, container and secret variables are not inherited. This path
+  uses the current shared checkout, never retries submission or falls back to a
+  remote host, and requires a job wrapper that initializes its own environment.
+  It does not authorize submission or establish site support. Plugin W&B sweep
+  runners are unsupported in this mode; use a prepared ledger or sweepfile.
 - `--dry-run`: resolve local YAML inputs or generate a ledger, then exit without
   controller startup, SSH connections, scheduler access, or live sweep runners.
   It is supported on CPU and GPU nodes, including containers without Slurm

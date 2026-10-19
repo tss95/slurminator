@@ -19,6 +19,7 @@ def _bare_orchestrator(
     *, batch_size: int = 2, batch_seconds: float = 2.0, checkpoint_size: int = 32
 ) -> HPCOrchestrator:
     orchestrator = object.__new__(HPCOrchestrator)
+    orchestrator.headless = False
     orchestrator.submission_batch_size = batch_size
     orchestrator.submission_batch_seconds = batch_seconds
     orchestrator.submission_checkpoint_size = checkpoint_size

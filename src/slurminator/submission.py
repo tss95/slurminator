@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import re
@@ -9,7 +10,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from shlex import quote
+from shlex import join
 from typing import Any
 
 from slurminator.experiments import ExperimentStatus
@@ -43,6 +44,7 @@ class SubmissionContext:
     memory_gb_override: int | None = None
     partition_overrides: Mapping[HPCType, str] = field(default_factory=dict)
     prepared_repositories: set[HPCType] | None = None
+    isolated_submission_env: bool = False
 
 
 def maybe_submit(
@@ -117,6 +119,19 @@ def submit_experiment_universal(exp: dict[str, Any], hpc_type: HPCType, context:
         logger.error("No HPC config for %s; cannot submit job", hpc_type)
         return None
 
+    submission_runner = getattr(context.connection_manager, "run_submission_command", None)
+    if context.isolated_submission_env:
+        if not context.is_local_hpc(hpc_type):
+            raise RuntimeError("Isolated submission requires the selected cluster to be local")
+        validator = getattr(context.connection_manager, "validate_isolated_submission_target", None)
+        if not callable(submission_runner) or not callable(validator):
+            raise RuntimeError("Connection manager does not support isolated submission")
+        try:
+            inspect.signature(submission_runner).bind(hpc_type, "sbatch", isolated=True)
+        except (TypeError, ValueError) as error:
+            raise RuntimeError("Connection manager does not support isolated submission") from error
+        validator(hpc_type)
+
     resources = resolve_submission_resources(exp, hpc_type, context)
     partition = context.partition_overrides.get(hpc_type) or cluster_config.partition.value
     if hpc_type in context.partition_overrides:
@@ -146,12 +161,15 @@ def submit_experiment_universal(exp: dict[str, Any], hpc_type: HPCType, context:
     )
     logger.debug("sbatch command: %s", sbatch_command)
 
-    if context.prepared_repositories is None or hpc_type not in context.prepared_repositories:
+    if not context.isolated_submission_env and (
+        context.prepared_repositories is None or hpc_type not in context.prepared_repositories
+    ):
         _prepare_repo_for_submission(hpc_type, cluster_config, context.connection_manager)
         if context.prepared_repositories is not None:
             context.prepared_repositories.add(hpc_type)
-    submission_runner = getattr(context.connection_manager, "run_submission_command", None)
-    if callable(submission_runner):
+    if context.isolated_submission_env:
+        out, err = submission_runner(hpc_type, sbatch_command, isolated=True)
+    elif callable(submission_runner):
         out, err = submission_runner(hpc_type, sbatch_command)
     else:
         # Compatibility path for injected connection-manager implementations.
@@ -173,6 +191,11 @@ def submit_experiment_universal(exp: dict[str, Any], hpc_type: HPCType, context:
 
     if err.strip():
         logger.error("sbatch error HPC=%s, exp=%s: %s", hpc_type, job_name, err.strip())
+    if context.isolated_submission_env:
+        raise RuntimeError(
+            "Isolated sbatch returned no recognizable job ID; submission outcome is unknown. "
+            "Inspect the scheduler before restarting this controller to avoid duplicate jobs."
+        )
     logger.error("Could not parse job_id from sbatch output: %r", out.strip())
     return None
 
@@ -286,6 +309,10 @@ def build_sbatch_command(
     export_vars = dict(resolve_sbatch_export_vars(cluster_config))
     export_vars["SLURMINATOR_NPROC_PER_NODE"] = str(resources.gpu_count)
     if export_vars:
+        if any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) for key in export_vars):
+            raise ValueError("sbatch export variable names must be valid environment names")
+        if any("," in str(value) for value in export_vars.values()):
+            raise ValueError("sbatch export values must not contain commas")
         env_block = ",".join(f"{key}={value}" for key, value in export_vars.items())
         sbatch = ["sbatch", f"--export=ALL,{env_block}"] + sbatch[1:]
         sbatch = [cmd for cmd in sbatch if cmd != "--export=ALL"]
@@ -309,23 +336,24 @@ def build_sbatch_command(
         sbatch.append("--export=ALL")
 
     universal_script = f"{cluster_config.repo_path}/universal_job.sh"
+    sbatch.append(universal_script)
+    if cluster_config.environment_setup:
+        sbatch.extend(["--env_script", f"{cluster_config.repo_path}/{cluster_config.environment_setup}"])
     sbatch.extend(
         [
-            universal_script,
-            (
-                f"--env_script {cluster_config.repo_path}/{cluster_config.environment_setup}"
-                if cluster_config.environment_setup
-                else ""
-            ),
-            f"--repo_path {cluster_config.repo_path}",
-            f"--save_path {cluster_config.save_path}",
+            "--repo_path",
+            str(cluster_config.repo_path),
+            "--save_path",
+            str(cluster_config.save_path),
             "--commands",
-            quote(commands_line),
-            f"--exp_id {job_name}",
-            f"--outdir {exp_output_dir}",
+            commands_line,
+            "--exp_id",
+            job_name,
+            "--outdir",
+            str(exp_output_dir),
         ]
     )
-    return " ".join(item for item in sbatch if item)
+    return join(sbatch)
 
 
 def _parse_sbatch_job_id(output: str) -> str | None:

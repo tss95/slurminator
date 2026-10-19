@@ -59,6 +59,7 @@ def prepare_launch_plan(
     evidence: list[str] | None = None,
     hpc_config_file: Path | None = None,
     repo_root: Path | None = None,
+    isolated_submission_env: bool = False,
 ) -> dict[str, Any]:
     """Return an unapproved, source-bound launch proposal with explicit estimates.
 
@@ -70,6 +71,8 @@ def prepare_launch_plan(
     No scheduler, network, controller, subprocess or source mutation is used.
     """
     selected_cluster = _cluster(cluster)
+    if not isinstance(isolated_submission_env, bool):
+        raise ValueError('isolated_submission_env must be a boolean')
     gpus = _integer(gpus_per_job, 'gpus_per_job', minimum=0)
     ram = _integer(ram_gb_per_job, 'ram_gb_per_job')
     hours = _integer(time_hours, 'time_hours')
@@ -206,6 +209,8 @@ def prepare_launch_plan(
     ]
     if repo_root is not None:
         argv.extend(['--repo-root', str(Path(repo_root).resolve())])
+    if isolated_submission_env:
+        argv.append('--isolated-submission-env')
     statuses = Counter(run.data['status'] for run in loaded.runs)
     return json_value(
         {
@@ -216,6 +221,7 @@ def prepare_launch_plan(
             'sources': loaded.sources,
             'hpc_config_source': {'path': str(config_path), 'sha256': hashlib.sha256(config_bytes).hexdigest()},
             'cluster': selected_cluster.value,
+            'submission_environment': 'isolated_local' if isolated_submission_env else 'inherited',
             'counts': {
                 'total': len(loaded.runs),
                 **{status.value: statuses[status.value] for status in ExperimentStatus},

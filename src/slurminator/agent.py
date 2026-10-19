@@ -41,6 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument('--evidence', action='append', default=[])
     prepare.add_argument('--hpc-config-file', type=Path)
     prepare.add_argument('--repo-root', type=Path)
+    prepare.add_argument('--isolated-submission-env', action='store_true')
     return parser
 
 
@@ -75,6 +76,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 evidence=args.evidence,
                 hpc_config_file=args.hpc_config_file,
                 repo_root=args.repo_root,
+                isolated_submission_env=args.isolated_submission_env,
             )
         print(json.dumps(result, allow_nan=False, separators=(',', ':')), flush=True)
     except (OSError, ValueError, RuntimeError, yaml.YAMLError) as error:

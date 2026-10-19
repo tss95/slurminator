@@ -116,6 +116,11 @@ def build_base_parser() -> argparse.ArgumentParser:
         help="Run without a dashboard or overview, publishing compact agent status and completion receipts.",
     )
     parser.add_argument("--no-prog", action="store_true", help="Reserved compatibility flag; ignored by orchestrator.")
+    parser.add_argument(
+        "--isolated-submission-env",
+        action="store_true",
+        help="Submit directly to local sbatch with a minimal environment; reject remote submission hosts.",
+    )
 
     parser.add_argument("--hpc-config-file", type=str, default=None, help="Path to hpc_config.yaml.")
     parser.add_argument(
@@ -181,6 +186,10 @@ def run_orchestrator_cli(
     if parser_extender is not None:
         parser = parser_extender(parser)
     args = parser.parse_args(raw_argv)
+    if args.isolated_submission_env and getattr(args, "wandb_sweep", None) is not None:
+        parser.error(
+            "--isolated-submission-env requires --yaml or --sweepfile; plugin sweep runners do not support isolation"
+        )
 
     if args_preparer is None and discovered_plugin is not None:
         args_preparer = _get_optional_hook(discovered_plugin, "prepare_args")
@@ -241,7 +250,10 @@ def run_orchestrator_cli(
 
     concurrency_limits = build_concurrency_limits(args)
     early_connection_manager = _bootstrap_connection_manager(
-        concurrency_limits, cluster_configs=cluster_configs, connection_manager_cls=connection_manager_cls
+        concurrency_limits,
+        cluster_configs=cluster_configs,
+        connection_manager_cls=connection_manager_cls,
+        isolated_submission_env=args.isolated_submission_env,
     )
 
     if getattr(args, "wandb_sweep", None) is not None:
@@ -286,6 +298,7 @@ def run_orchestrator_cli(
         dashboard_settings=loaded_config.orchestrator.dashboard if loaded_config is not None else None,
         **({"low_compute": True} if args.low_compute else {}),
         **({"headless": True} if args.headless else {}),
+        **({"isolated_submission_env": True} if args.isolated_submission_env else {}),
     )
     orchestrator.run()
 
@@ -503,13 +516,23 @@ def _bootstrap_connection_manager(
     *,
     cluster_configs: Mapping[HPCType, Any] | None = None,
     connection_manager_cls: type[HPCConnectionManager] = HPCConnectionManager,
+    isolated_submission_env: bool = False,
 ) -> HPCConnectionManager | None:
     """Create and warm SSH connections for clusters with non-zero limits."""
     conn_cfgs = _connection_configs_for_limits(concurrency_limits, cluster_configs=cluster_configs)
+    if isolated_submission_env:
+        conn_cfgs = {hpc: config for hpc, config in conn_cfgs.items() if concurrency_limits.get(hpc, 0) > 0}
     if not conn_cfgs:
         return None
 
     connection_manager = connection_manager_cls(conn_cfgs)
+    if isolated_submission_env:
+        validator = getattr(connection_manager, "validate_isolated_submission_target", None)
+        if not callable(validator):
+            raise RuntimeError("Connection manager does not support isolated submission")
+        for hpc in conn_cfgs:
+            validator(hpc)
+        return connection_manager
     for hpc in list(conn_cfgs.keys()):
         try:
             is_local = connection_manager.is_local_hpc(hpc)

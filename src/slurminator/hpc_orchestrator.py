@@ -140,6 +140,7 @@ class HPCOrchestrator:
         telemetry_batch_size: int = DEFAULT_TELEMETRY_BATCH_SIZE,
         low_compute: bool = False,
         headless: bool = False,
+        isolated_submission_env: bool = False,
     ) -> None:
         if low_compute and (not math.isfinite(poll_interval) or poll_interval <= 0):
             raise ValueError("poll_interval must be a positive finite number in low-compute mode")
@@ -221,6 +222,7 @@ class HPCOrchestrator:
 
         self.debug = debug
         self.headless = headless
+        self.isolated_submission_env = isolated_submission_env
         self.dashboard_ui = dashboard_ui
         self.dashboard_settings = dashboard_settings
         self.retry_timeout_with_estimated_time = retry_timeout_with_estimated_time
@@ -281,7 +283,7 @@ class HPCOrchestrator:
             # Automatically include jump hosts needed for proxy connections
             jump_hosts_needed = set()
             for hpc_type, cfg in connection_configs.items():
-                if cfg.proxy_jump:
+                if cfg.proxy_jump and not isolated_submission_env:
                     try:
                         jump_hpc_type = HPCType[cfg.proxy_jump.upper()]
                         if jump_hpc_type not in connection_configs and jump_hpc_type in HPC_CONFIGS:
@@ -307,6 +309,14 @@ class HPCOrchestrator:
                 )
 
             self.connection_manager = HPCConnectionManager(configs=connection_configs)
+
+        if isolated_submission_env:
+            validator = getattr(self.connection_manager, "validate_isolated_submission_target", None)
+            if not callable(validator):
+                raise RuntimeError("Connection manager does not support isolated submission")
+            for hpc_type, limit in self.concurrency_limits.items():
+                if limit > 0:
+                    validator(hpc_type)
 
         # Resolved from the already-required startup load in ``run``. Avoiding
         # an eager parse here matters for very large experiment ledgers.
@@ -1335,6 +1345,7 @@ class HPCOrchestrator:
             memory_gb_override=self.memory_gb_override,
             partition_overrides=self.partition_overrides,
             prepared_repositories=self._prepared_submission_repositories,
+            isolated_submission_env=getattr(self, "isolated_submission_env", False),
         )
         return submit_experiment_universal(exp, hpc_type, context)
 

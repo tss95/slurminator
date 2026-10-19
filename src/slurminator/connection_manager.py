@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import pwd
 import re
 import shlex
 import shutil
@@ -1072,8 +1073,50 @@ class HPCConnectionManager:
             logger.error(f"Error during standard authentication: {type(e).__name__}: {e}")
             raise
 
-    def run_submission_command(self, hpc_type: HPCType, command: str) -> Tuple[str, str]:
-        """Run one non-idempotent Slurm submission without transport retry."""
+    def validate_isolated_submission_target(self, hpc_type: HPCType) -> None:
+        """Reject remote targets before an isolated local submission has side effects."""
+        if not self.is_local_hpc(hpc_type):
+            raise RuntimeError("Isolated submission requires the selected cluster to be local")
+        cfg = self.configs[hpc_type]
+        submission_host = _env("SUBMISSION_HOST", hpc_name=hpc_type.name) or cfg.submission_host
+        if submission_host and not _is_loopback_or_current_host(submission_host):
+            raise RuntimeError("Isolated submission does not support a remote submission_host")
+
+    def run_submission_command(self, hpc_type: HPCType, command: str, *, isolated: bool = False) -> Tuple[str, str]:
+        """Submit once, optionally using only local sbatch with a minimal environment."""
+        if isolated:
+            self.validate_isolated_submission_target(hpc_type)
+            argv = shlex.split(command)
+            if not argv or argv[0] != "sbatch":
+                raise ValueError("Isolated submission requires a direct sbatch command")
+            export_options = [arg for arg in argv[1:] if arg.startswith("--export")]
+            if any(not (arg == "--export=ALL" or arg.startswith("--export=ALL,")) for arg in export_options):
+                raise ValueError("Isolated submission requires --export=ALL with optional explicit assignments")
+            if any(arg.startswith("--get-user-env") for arg in argv[1:]):
+                raise ValueError("Isolated submission must not reconstruct the login environment")
+            if not export_options:
+                argv.insert(1, "--export=ALL")
+            # Resolve in the controller's current namespace before replacing its
+            # environment. A sandbox-provided sbatch stub remains authoritative.
+            executable = shutil.which("sbatch")
+            if executable is None:
+                raise RuntimeError("Local sbatch is unavailable for isolated submission")
+            argv[0] = os.path.abspath(executable)
+            identity = pwd.getpwuid(os.getuid())
+            environment = {
+                "PATH": "/usr/bin:/bin",
+                "HOME": identity.pw_dir,
+                "USER": identity.pw_name,
+                "LOGNAME": identity.pw_name,
+                "LANG": "C",
+            }
+            result = subprocess.run(argv, capture_output=True, text=True, env=environment, check=False)
+            if result.returncode:
+                raise RuntimeError(
+                    f"Isolated sbatch failed with exit status {result.returncode}: "
+                    f"{result.stderr.strip() or result.stdout.strip()}"
+                )
+            return result.stdout, result.stderr
         return self.run_command(hpc_type, command, prefer_remote=True, retry_on_failure=False)
 
     def run_command(

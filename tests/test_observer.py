@@ -227,7 +227,8 @@ def test_real_publisher_completion_is_consumed_once(ledger: Path, monkeypatch: p
     assert result['status']['counts']['completed'] == 1
 
 
-def test_cli_prepare_only_produces_an_unapproved_proposal(tmp_path: Path, capsys) -> None:
+@pytest.mark.parametrize('isolated', [False, True])
+def test_cli_prepare_only_produces_an_unapproved_proposal(tmp_path: Path, capsys, isolated: bool) -> None:
     ledger = tmp_path / 'pending.yaml'
     ledger.write_text('experiments:\n- experiment_id: a\n  status: pending\n')
     config = tmp_path / 'hpc.yaml'
@@ -254,10 +255,13 @@ def test_cli_prepare_only_produces_an_unapproved_proposal(tmp_path: Path, capsys
             'Measured peak plus margin.',
             '--time-reason',
             'Measured throughput plus evaluation margin.',
+            *(['--isolated-submission-env'] if isolated else []),
         ]
     )
     result = json.loads(capsys.readouterr().out)
     assert result['approval_status'] == 'awaiting_user'
     assert result['concurrency'] == 1
     assert '--headless' in result['argv']
+    assert ('--isolated-submission-env' in result['argv']) is isolated
+    assert result['submission_environment'] == ('isolated_local' if isolated else 'inherited')
     assert set(tmp_path.iterdir()) == {ledger, config}

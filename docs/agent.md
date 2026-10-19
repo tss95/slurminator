@@ -120,6 +120,21 @@ derive estimates for the actual recipe:
 - Concurrency: normally accommodate all eligible runs. Use a smaller limit only
   for an explicit user choice or concrete resource constraint; explain it.
 
+For a local controller running inside its own allocation, add
+`--isolated-submission-env` to `prepare` so the exact proposed launch includes
+environment isolation. This selects direct local sbatch execution with only a
+minimal identity/process environment and explicit cluster `sbatch_env` values.
+It retains `--export=ALL` over that clean environment to avoid implicit login
+environment reconstruction. The current shared checkout supplies the child
+script; the controller does not run remote repository preparation in this mode.
+The child wrapper must initialize its runtime and set `SLURM_EXPORT_ENV=ALL`
+before launching job steps. PMT's `universal_job.sh` does this.
+
+Slurm always carries submission-process `SLURM_*` variables, including with
+restricted export modes. Sanitizing only the `--export` argument is insufficient;
+the process environment must be isolated too. See the official
+[sbatch export documentation](https://slurm.schedmd.com/sbatch.html#OPT_export).
+
 The tool records explanations, optional evidence references, ledger/config hashes,
 resource precedence, peak concurrent requests and an exact command. Estimates are
 supplied by the agent; the tool does not infer reliable resource needs from YAML

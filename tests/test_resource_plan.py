@@ -59,6 +59,7 @@ def test_proposal_is_read_only_source_bound_and_awaits_approval(tmp_path: Path, 
     monkeypatch.setattr(subprocess, 'Popen', denied)
     result = _prepare(path, config, evidence=['reports/comparable-run.json'])
     assert result['approval_status'] == 'awaiting_user'
+    assert result['submission_environment'] == 'inherited'
     assert result['sources'][0]['sha256'] == hashlib.sha256(original).hexdigest()
     assert result['hpc_config_source']['sha256'] == hashlib.sha256(config.read_bytes()).hexdigest()
     assert result['concurrency'] == 100
@@ -90,6 +91,13 @@ def test_proposal_is_read_only_source_bound_and_awaits_approval(tmp_path: Path, 
     assert path.read_bytes() == original
     assert HPC_CONFIGS == registry_before
     assert set(tmp_path.iterdir()) == {path, config}
+
+
+def test_isolated_submission_is_pinned_in_unapproved_command(tmp_path: Path) -> None:
+    plan = _prepare(_ledger(tmp_path, [{'experiment_id': 'pending'}]), _config(tmp_path), isolated_submission_env=True)
+    assert plan['submission_environment'] == 'isolated_local'
+    assert '--isolated-submission-env' in plan['argv']
+    assert plan['approval_status'] == 'awaiting_user'
 
 
 @pytest.mark.parametrize(
