@@ -1,8 +1,10 @@
 import copy
 import importlib
+import json
 import logging
 import math
 import os
+import sys
 import time
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
@@ -137,6 +139,7 @@ class HPCOrchestrator:
         telemetry_interval_seconds: float = DEFAULT_TELEMETRY_INTERVAL_SECONDS,
         telemetry_batch_size: int = DEFAULT_TELEMETRY_BATCH_SIZE,
         low_compute: bool = False,
+        headless: bool = False,
     ) -> None:
         if low_compute and (not math.isfinite(poll_interval) or poll_interval <= 0):
             raise ValueError("poll_interval must be a positive finite number in low-compute mode")
@@ -217,6 +220,7 @@ class HPCOrchestrator:
         self.memory_gb_override = memory_gb_override
 
         self.debug = debug
+        self.headless = headless
         self.dashboard_ui = dashboard_ui
         self.dashboard_settings = dashboard_settings
         self.retry_timeout_with_estimated_time = retry_timeout_with_estimated_time
@@ -237,8 +241,11 @@ class HPCOrchestrator:
             self.plugin, "parse_sweep_overrides", parse_override_list
         )
         self.is_local_hpc_fn = is_local_hpc_fn or _get_plugin_callable(self.plugin, "is_local_hpc", is_current_hpc)
-        self.dashboard_cls = dashboard_cls or _call_plugin_noarg_hook(self.plugin, "dashboard_class")
-        self.overview_printer = overview_printer or _call_plugin_noarg_hook(self.plugin, "overview_printer")
+        self.dashboard_cls = dashboard_cls
+        self.overview_printer = overview_printer
+        if not self.headless:
+            self.dashboard_cls = dashboard_cls or _call_plugin_noarg_hook(self.plugin, "dashboard_class")
+            self.overview_printer = overview_printer or _call_plugin_noarg_hook(self.plugin, "overview_printer")
 
         # Build or reuse HPC connections
         if connection_manager is not None:
@@ -307,6 +314,9 @@ class HPCOrchestrator:
 
     def run(self) -> None:
         """Manage experiments and print the YAML reference after shutdown."""
+        if self.headless:
+            self._run_headless()
+            return
         # Lazily import the Rich dashboard only when we actually need it to avoid
         # hard dependency issues in "--debug" / unit-test scenarios where Rich
         # might not be available.
@@ -465,6 +475,110 @@ class HPCOrchestrator:
         # Keep this plain and last so humans and agents can copy the YAML path.
         outcome = "COMPLETE" if all_done else "STOPPED"
         print(f"EXPERIMENT {outcome}: {self.experiment_file}", flush=True)
+
+    def _run_headless(self) -> None:
+        """Run normal maintenance without UI, publishing a durable completion receipt.
+
+        Headless completion excludes resubmittable PARTIAL rows and waits for
+        each terminal job's bounded final telemetry reads. UI mode retains its
+        existing exit policy. No observer publication makes scheduler queries.
+        """
+        from slurminator.controller_status import ControllerStatusPublisher, ledger_fingerprint
+
+        data: dict[str, Any] | None = None
+        final_fingerprint: dict[str, Any] | None = None
+        final_ledger_saved = False
+        publisher = ControllerStatusPublisher(
+            self.experiment_file, heartbeat_interval_seconds=max(10.0, self.poll_interval)
+        )
+        with publisher:
+            try:
+                publisher.publish("starting", [])
+                try:
+                    self.connection_manager.connect_all()
+                    if not self.experiment_file.is_file():
+                        raise FileNotFoundError(f"Experiment ledger not found: {self.experiment_file}")
+                    data = self._load_yaml()
+                    self._configure_volume_mode(data)
+                    self._preflight_validate_experiments(data)
+                    self._preflight_test_hpcs()
+                    for hpc_type in self.connection_manager.configs:
+                        if self.concurrency_limits.get(hpc_type, 0) > 0:
+                            self._ensure_remote_dirs(hpc_type, data=data)
+                            self.plugin.prepare_remote_runtime(
+                                hpc_type=hpc_type, connection_manager=self.connection_manager
+                            )
+                    data = self._recover_orphans(data)
+                    resume_data = self._catch_up_existing_state(data)
+                    data = resume_data if resume_data is not None else data
+                    scheduler_verified = resume_data is not None
+                    first_cycle = True
+                    publisher.publish("running", data["experiments"])
+                    while True:
+                        if not first_cycle and not self.high_volume_mode:
+                            data = self._load_yaml()
+                        exps = data["experiments"]
+                        self._initialise_headless_terminal_telemetry(exps)
+                        self._maintain_cycle(data, scheduler_already_verified=scheduler_verified and first_cycle)
+                        exps = data["experiments"]
+                        terminal = all(is_terminal_status(exp.get("status")) for exp in exps)
+                        pending_telemetry = any(self._terminal_telemetry_pending(exp) for exp in exps)
+                        publisher.publish("finalizing" if terminal else "running", exps)
+                        if terminal and not pending_telemetry:
+                            # Includes journal compaction and all retry/submission
+                            # decisions made by the maintenance cycle above.
+                            self._save_yaml(data)
+                            final_ledger_saved = True
+                            final_fingerprint = ledger_fingerprint(self.experiment_file, durable=True)
+                            break
+                        if self.high_volume_mode and self._state_checkpoint_due():
+                            self._checkpoint_and_repoll(data)
+                        first_cycle = False
+                        time.sleep(self.poll_interval)
+                finally:
+                    # A cleanup failure must not leave a finished receipt. During
+                    # another exception, preserve that original failure instead.
+                    active_exception = sys.exc_info()[0] is not None
+                    try:
+                        self.connection_manager.close_all()
+                    except Exception:
+                        if not active_exception:
+                            raise
+                        logger.exception("Closing headless HPC connections also failed.")
+                finished = publisher.publish(
+                    "finished", data["experiments"], finalized=True, expected_fingerprint=final_fingerprint
+                )
+            except BaseException as exc:
+                state = "stopped" if isinstance(exc, KeyboardInterrupt) else "error"
+                if data is not None and not final_ledger_saved:
+                    try:
+                        self._save_yaml(data)
+                    except Exception:
+                        logger.exception("Could not checkpoint interrupted headless controller.")
+                try:
+                    publisher.publish(
+                        state,
+                        data["experiments"] if data is not None else [],
+                        force=True,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                except Exception:
+                    logger.exception("Could not publish headless controller failure; original error follows.")
+                raise
+        summary = {key: value for key, value in finished.items() if key != "runs"}
+        summary["status_path"] = str(publisher.path)
+        print(json.dumps(summary, allow_nan=False, separators=(",", ":")), flush=True)
+
+    @staticmethod
+    def _initialise_headless_terminal_telemetry(exps: list[dict[str, Any]]) -> None:
+        """Give resumed terminal jobs without a matching receipt a finite final-read budget."""
+        for exp in exps:
+            job_id = exp.get("job_id")
+            if not job_id or not is_terminal_status(exp.get("status")):
+                continue
+            state = exp.get("terminal_telemetry")
+            if not isinstance(state, Mapping) or str(state.get("job_id")) != str(job_id):
+                exp["terminal_telemetry"] = {"job_id": str(job_id), "attempts": 0, "finalized": False}
 
     def _configure_volume_mode(self, data: Mapping[str, Any]) -> None:
         """Use bounded in-memory maintenance for large ledgers or low-compute mode."""
@@ -707,7 +821,8 @@ class HPCOrchestrator:
         )
         if active_before == 0:
             if recovered_timeout_retry:
-                self._publish_dashboard_snapshot(exps)
+                if not getattr(self, "headless", False):
+                    self._publish_dashboard_snapshot(exps)
                 return data
             return None
 
@@ -717,7 +832,8 @@ class HPCOrchestrator:
             # A TIMEOUT retry decision is not scheduler-owned and therefore is
             # checkpointed before a replacement job can be submitted.
             self._save_yaml(data)
-        self._publish_dashboard_snapshot(exps)
+        if not getattr(self, "headless", False):
+            self._publish_dashboard_snapshot(exps)
 
         active_after = sum(
             1
@@ -923,6 +1039,8 @@ class HPCOrchestrator:
             try:
                 self._update_running_experiment_info(exp, include_history=include_history)
             except Exception as exc:
+                if getattr(self, "headless", False):
+                    raise
                 logger.warning("Telemetry update failed for %s: %s", exp.get("experiment_id"), exc)
         return len(selected)
 

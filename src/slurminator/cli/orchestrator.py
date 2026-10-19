@@ -110,6 +110,11 @@ def build_base_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="Resolve/generate local experiment YAML without connections or jobs."
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run without a dashboard or overview, publishing compact agent status and completion receipts.",
+    )
     parser.add_argument("--no-prog", action="store_true", help="Reserved compatibility flag; ignored by orchestrator.")
 
     parser.add_argument("--hpc-config-file", type=str, default=None, help="Path to hpc_config.yaml.")
@@ -183,6 +188,9 @@ def run_orchestrator_cli(
         args_preparer(args)
     else:
         _normalise_generic_generation_args(args)
+
+    if args.headless:
+        _route_console_logs_to_stderr()
 
     if args.low_compute:
         if args.poll_interval <= 0:
@@ -277,8 +285,23 @@ def run_orchestrator_cli(
         partition_overrides=partition_overrides,
         dashboard_settings=loaded_config.orchestrator.dashboard if loaded_config is not None else None,
         **({"low_compute": True} if args.low_compute else {}),
+        **({"headless": True} if args.headless else {}),
     )
     orchestrator.run()
+
+
+def _route_console_logs_to_stderr() -> None:
+    """Reserve headless stdout for results while preserving file/capture handlers."""
+    loggers = [logging.getLogger()]
+    loggers.extend(value for value in logging.Logger.manager.loggerDict.values() if isinstance(value, logging.Logger))
+    for active_logger in loggers:
+        for handler in active_logger.handlers:
+            if (
+                isinstance(handler, logging.StreamHandler)
+                and not isinstance(handler, logging.FileHandler)
+                and (handler.stream is sys.stdout or handler.stream is sys.__stdout__)
+            ):
+                handler.setStream(sys.stderr)
 
 
 def _resolve_dashboard_ui(cli_value: str | None, loaded_config: Any | None) -> str:

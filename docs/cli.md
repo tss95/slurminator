@@ -75,6 +75,12 @@ Partition overrides:
   `orchestrator_config.yaml` may set `dashboard.ui_version`; otherwise the
   package default is `v4`. Use `--dashboard-ui v3` for the legacy Rich
   dashboard.
+- `--headless`: run controller maintenance without a dashboard or repeated
+  overview output. Publish compact status/progress receipts and a final JSON
+  summary after terminal telemetry collection and ledger saving settle. Normal
+  resource and scheduler settings remain in effect. See the
+  [agent interface](agent.md) for read-only `status`, `wait`, and `prepare`
+  commands and the required launch-approval workflow.
 - `--dry-run`: resolve local YAML inputs or generate a ledger, then exit without
   controller startup, SSH connections, scheduler access, or live sweep runners.
   It is supported on CPU and GPU nodes, including containers without Slurm
@@ -88,7 +94,7 @@ Partition overrides:
 
 ### Final experiment reference
 
-After the dashboard and HPC connections close, the final line identifies the
+In dashboard mode, after the dashboard and HPC connections close, the final line identifies the
 experiment-state YAML for copying into agent prompts or a later `--yaml` command:
 
 ```text
@@ -102,6 +108,12 @@ have failed. Quitting the dashboard or interrupting an unfinished run prints
 `EXPERIMENT STOPPED: <path>`. A dry run ends with `DRY RUN COMPLETE: <path>`, using
 the generated experiment YAML when `--sweepfile` was provided. Exceptions still
 propagate without a completion marker.
+
+Headless mode instead prints a final JSON summary with the ledger path, status
+receipt path, outcome, progress, counts, and missing metrics. Its observers use
+the receipt's controller identity and final ledger hash to distinguish completion
+from interruption, replacement, or later ledger changes. A 100% progress value
+alone does not establish finalization.
 
 ### Low-compute preset
 

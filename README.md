@@ -102,6 +102,11 @@ For compact, read-only status and result summaries, use
 summaries, and observed history queries; an accompanying
 [agent skill](skills/slurminator-results/SKILL.md) avoids repeated parsing scripts.
 
+The [agent interface](docs/agent.md) adds JSON progress/count queries, quiet
+completion waits, and resource proposals that require explicit user approval.
+Approved controllers can use `--headless` to publish status without a dashboard.
+The observer commands never launch a controller or submit jobs.
+
 ## Quickstart
 
 Create a user config:
