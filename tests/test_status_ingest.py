@@ -1,3 +1,5 @@
+from typing import Literal
+
 import pytest
 
 from slurminator.config import HPCType
@@ -6,6 +8,8 @@ from slurminator.schemas.status_schema import HistoryEntry, OrchestratorStatus
 from slurminator.status_ingest import (
     HISTORY_TERMINAL_BOUND,
     StatusIngestContext,
+    TERMINAL_TELEMETRY_MAX_ATTEMPTS,
+    TERMINAL_TELEMETRY_STATE_FIELD,
     force_read_full_history,
     history_file_path,
     status_file_path,
@@ -34,11 +38,11 @@ class FakeStatusConnection:
         raise AssertionError(f"unexpected command: {command}")
 
 
-def _status_json(*, job_id: str = "12345") -> str:
+def _status_json(*, job_id: str = "12345", status: Literal["initializing", "running", "completed"] = "running") -> str:
     return OrchestratorStatus(
         experiment_id="exp-1",
         job_id=job_id,
-        status="running",
+        status=status,
         last_update=100.0,
         progress={"unit": "epoch", "current": 1, "total": 2, "current_epoch": 1, "total_epochs": 2},
         metrics={"train/loss": 0.5},
@@ -55,13 +59,14 @@ def _history_line(*, attempt: int = 1, epoch: int = 1, loss: float = 0.5) -> str
     )
 
 
-def _context(connection: FakeStatusConnection) -> StatusIngestContext:
+def _context(connection: FakeStatusConnection, *, include_history: bool = True) -> StatusIngestContext:
     saved: list[dict] = []
     return StatusIngestContext(
         connection_manager=connection,
         hpc_configs={},
         load_yaml=lambda: {"experiments": [{"experiment_id": "exp-1"}]},
         save_yaml=saved.append,
+        include_history=include_history,
     )
 
 
@@ -70,7 +75,7 @@ def test_status_and_history_file_paths_use_sweep_directory_when_present() -> Non
     assert history_file_path("/save", "4242", "abc") == "/save/.orchestrator_status/sweep_abc/history_4242.jsonl"
 
 
-def test_update_running_experiment_info_merges_incremental_history() -> None:
+def test_default_status_ingest_preserves_incremental_history() -> None:
     history_payload = _history_line(epoch=1, loss=1.0) + _history_line(epoch=2, loss=0.8)
     connection = FakeStatusConnection(status_payload=_status_json(), history_payload=history_payload)
     exp = {
@@ -89,6 +94,26 @@ def test_update_running_experiment_info_merges_incremental_history() -> None:
     assert exp["history_attempt_max"] == 1
     assert exp["history_last_read_offset"] == len(history_payload.encode("utf-8"))
     assert exp["last_metrics_update"] == 100.0
+    assert [command.split()[0] for _, command in connection.commands] == ["cat", "stat", "tail"]
+
+
+def test_status_only_ingest_does_not_stat_or_tail_history() -> None:
+    history_payload = _history_line(epoch=1, loss=1.0) + _history_line(epoch=2, loss=0.8)
+    connection = FakeStatusConnection(status_payload=_status_json(), history_payload=history_payload)
+    exp = {
+        "experiment_id": "exp-1",
+        "status": "running",
+        "job_id": "12345",
+        "hpc_assignment": HPCType.OLIVIA,
+        "save_path": "/save",
+    }
+
+    data = update_running_experiment_info(exp, _context(connection, include_history=False))
+
+    assert data is not None
+    assert "history" not in exp
+    assert "history_last_read_offset" not in exp
+    assert connection.commands == [(HPCType.OLIVIA, "cat /save/.orchestrator_status/status_12345.json 2>/dev/null")]
 
 
 def test_changed_status_persists_immediately_by_default() -> None:
@@ -152,6 +177,7 @@ def test_changed_status_can_be_ingested_in_memory_without_ledger_io() -> None:
         load_yaml=unexpected_load,
         save_yaml=unexpected_save,
         persist_immediately=False,
+        include_history=False,
     )
     exp = {
         "experiment_id": "exp-1",
@@ -167,7 +193,8 @@ def test_changed_status_can_be_ingested_in_memory_without_ledger_io() -> None:
     assert exp["all_metrics"] == {"train/loss": 0.5}
     assert exp["current_epoch"] == 1
     assert exp["last_metrics_update"] == 100.0
-    assert exp["history"] == [HistoryEntry.model_validate_json(history_payload).model_dump(mode="json")]
+    assert "history" not in exp
+    assert connection.commands == [(HPCType.OLIVIA, "cat /save/.orchestrator_status/status_12345.json 2>/dev/null")]
 
 
 def test_force_read_full_history_resets_offset_and_replaces_history() -> None:
@@ -183,11 +210,15 @@ def test_force_read_full_history_resets_offset_and_replaces_history() -> None:
         "history_last_read_offset": 999,
     }
 
-    force_read_full_history(exp, _context(connection))
+    force_read_full_history(exp, _context(connection, include_history=False))
 
     assert exp["history"] == [HistoryEntry.model_validate_json(history_payload).model_dump(mode="json")]
     assert exp["history_last_read_offset"] == len(history_payload.encode("utf-8"))
     assert exp["history_attempt_max"] == 2
+    assert [command for _, command in connection.commands] == [
+        'stat -c "%s" /save/.orchestrator_status/history_12345.jsonl 2>/dev/null || echo 0',
+        "tail -c +1 /save/.orchestrator_status/history_12345.jsonl 2>/dev/null",
+    ]
 
 
 def test_terminal_history_is_bounded_once_status_is_ingested() -> None:
@@ -219,7 +250,11 @@ def test_unchanged_terminal_status_skips_history_and_ledger_persistence() -> Non
         raise AssertionError("unchanged telemetry must not rewrite the experiment ledger")
 
     context = StatusIngestContext(
-        connection_manager=connection, hpc_configs={}, load_yaml=unexpected_load, save_yaml=unexpected_save
+        connection_manager=connection,
+        hpc_configs={},
+        load_yaml=unexpected_load,
+        save_yaml=unexpected_save,
+        include_history=False,
     )
     exp = {
         "experiment_id": "exp-1",
@@ -240,7 +275,7 @@ def test_unchanged_terminal_status_skips_history_and_ledger_persistence() -> Non
     assert connection.commands == [(HPCType.OLIVIA, "cat /save/.orchestrator_status/status_12345.json 2>/dev/null")]
 
 
-def test_unchanged_running_status_still_merges_new_history_without_ledger_persistence() -> None:
+def test_unchanged_running_status_skips_history_and_ledger_persistence() -> None:
     history_payload = _history_line(epoch=2, loss=0.8)
     connection = FakeStatusConnection(status_payload=_status_json(), history_payload=history_payload)
 
@@ -251,7 +286,11 @@ def test_unchanged_running_status_still_merges_new_history_without_ledger_persis
         raise AssertionError("unchanged telemetry must not rewrite the experiment ledger")
 
     context = StatusIngestContext(
-        connection_manager=connection, hpc_configs={}, load_yaml=unexpected_load, save_yaml=unexpected_save
+        connection_manager=connection,
+        hpc_configs={},
+        load_yaml=unexpected_load,
+        save_yaml=unexpected_save,
+        include_history=False,
     )
     exp = {
         "experiment_id": "exp-1",
@@ -264,5 +303,149 @@ def test_unchanged_running_status_still_merges_new_history_without_ledger_persis
 
     update_running_experiment_info(exp, context)
 
-    assert exp["history"] == [HistoryEntry.model_validate_json(history_payload).model_dump(mode="json")]
-    assert exp["history_last_read_offset"] == len(history_payload.encode("utf-8"))
+    assert "history" not in exp
+    assert "history_last_read_offset" not in exp
+    assert connection.commands == [(HPCType.OLIVIA, "cat /save/.orchestrator_status/status_12345.json 2>/dev/null")]
+
+
+def test_completed_callback_finalizes_terminal_telemetry_and_skips_future_reads() -> None:
+    connection = FakeStatusConnection(status_payload=_status_json(status="completed"))
+    exp = {
+        "experiment_id": "exp-1",
+        "status": ExperimentStatus.COMPLETED,
+        "job_id": "12345",
+        "hpc_assignment": HPCType.OLIVIA,
+        "save_path": "/save",
+    }
+
+    data = update_running_experiment_info(exp, _context(connection))
+    second_data = update_running_experiment_info(exp, _context(connection))
+
+    assert data is not None
+    assert second_data is None
+    assert exp[TERMINAL_TELEMETRY_STATE_FIELD] == {
+        "job_id": "12345",
+        "attempts": 1,
+        "last_result": "callback_completed",
+        "finalized": True,
+        "finalized_reason": "callback_completed",
+    }
+    assert connection.commands == [(HPCType.OLIVIA, "cat /save/.orchestrator_status/status_12345.json 2>/dev/null")]
+
+
+def test_missing_terminal_status_is_retired_after_bounded_attempts() -> None:
+    connection = FakeStatusConnection(status_payload="")
+    exp = {
+        "experiment_id": "exp-1",
+        "status": ExperimentStatus.FAILED,
+        "job_id": "12345",
+        "hpc_assignment": HPCType.OLIVIA,
+        "save_path": "/save",
+    }
+
+    for _ in range(TERMINAL_TELEMETRY_MAX_ATTEMPTS + 2):
+        assert update_running_experiment_info(exp, _context(connection)) is None
+
+    assert exp[TERMINAL_TELEMETRY_STATE_FIELD] == {
+        "job_id": "12345",
+        "attempts": TERMINAL_TELEMETRY_MAX_ATTEMPTS,
+        "finalized": True,
+        "last_result": "missing",
+        "finalized_reason": "retry_limit",
+    }
+    assert len(connection.commands) == TERMINAL_TELEMETRY_MAX_ATTEMPTS
+
+
+@pytest.mark.parametrize(
+    ("missing_field", "result"), [("hpc_assignment", "missing_hpc"), ("save_path", "missing_save_path")]
+)
+def test_terminal_telemetry_without_read_configuration_is_bounded(missing_field: str, result: str) -> None:
+    connection = FakeStatusConnection()
+    exp = {
+        "experiment_id": "exp-1",
+        "status": ExperimentStatus.COMPLETED,
+        "job_id": "12345",
+        "hpc_assignment": HPCType.OLIVIA,
+        "save_path": "/save",
+    }
+    exp.pop(missing_field)
+
+    for _ in range(TERMINAL_TELEMETRY_MAX_ATTEMPTS + 2):
+        assert update_running_experiment_info(exp, _context(connection)) is None
+
+    state = exp[TERMINAL_TELEMETRY_STATE_FIELD]
+    assert state["attempts"] == TERMINAL_TELEMETRY_MAX_ATTEMPTS
+    assert state["finalized"] is True
+    assert state["last_result"] == result
+    assert connection.commands == []
+
+
+def test_terminal_read_errors_count_toward_retry_budget_and_propagate(monkeypatch) -> None:
+    connection = FakeStatusConnection()
+    exp = {
+        "experiment_id": "exp-1",
+        "status": ExperimentStatus.COMPLETED,
+        "job_id": "12345",
+        "hpc_assignment": HPCType.OLIVIA,
+        "save_path": "/save",
+    }
+
+    def read_error(*_args):
+        raise OSError("status read failed")
+
+    monkeypatch.setattr(connection, "run_command", read_error)
+    for _ in range(TERMINAL_TELEMETRY_MAX_ATTEMPTS):
+        with pytest.raises(OSError, match="status read failed"):
+            update_running_experiment_info(exp, _context(connection))
+
+    state = exp[TERMINAL_TELEMETRY_STATE_FIELD]
+    assert state["attempts"] == TERMINAL_TELEMETRY_MAX_ATTEMPTS
+    assert state["finalized"] is True
+    assert state["last_result"] == "read_error"
+    assert update_running_experiment_info(exp, _context(connection)) is None
+
+
+def test_terminal_telemetry_accepts_completed_callback_before_retry_limit() -> None:
+    connection = FakeStatusConnection(status_payload=_status_json())
+    exp = {
+        "experiment_id": "exp-1",
+        "status": ExperimentStatus.COMPLETED,
+        "job_id": "12345",
+        "hpc_assignment": HPCType.OLIVIA,
+        "save_path": "/save",
+    }
+
+    for _ in range(TERMINAL_TELEMETRY_MAX_ATTEMPTS - 1):
+        update_running_experiment_info(exp, _context(connection))
+    connection.status_payload = _status_json(status="completed")
+    update_running_experiment_info(exp, _context(connection))
+
+    state = exp[TERMINAL_TELEMETRY_STATE_FIELD]
+    assert state["attempts"] == TERMINAL_TELEMETRY_MAX_ATTEMPTS
+    assert state["finalized"] is True
+    assert state["finalized_reason"] == "callback_completed"
+    assert len(connection.commands) == TERMINAL_TELEMETRY_MAX_ATTEMPTS
+
+
+def test_terminal_telemetry_finalization_is_scoped_to_job_id() -> None:
+    connection = FakeStatusConnection(status_payload=_status_json(job_id="new-job", status="completed"))
+    exp = {
+        "experiment_id": "exp-1",
+        "status": ExperimentStatus.COMPLETED,
+        "job_id": "new-job",
+        "hpc_assignment": HPCType.OLIVIA,
+        "save_path": "/save",
+        TERMINAL_TELEMETRY_STATE_FIELD: {
+            "job_id": "old-job",
+            "attempts": TERMINAL_TELEMETRY_MAX_ATTEMPTS,
+            "finalized": True,
+            "finalized_reason": "retry_limit",
+        },
+    }
+
+    update_running_experiment_info(exp, _context(connection))
+
+    assert exp[TERMINAL_TELEMETRY_STATE_FIELD]["job_id"] == "new-job"
+    assert exp[TERMINAL_TELEMETRY_STATE_FIELD]["attempts"] == 1
+    assert exp[TERMINAL_TELEMETRY_STATE_FIELD]["finalized_reason"] == "callback_completed"
+    assert connection.commands == [(HPCType.OLIVIA, "cat /save/.orchestrator_status/status_new-job.json 2>/dev/null")]

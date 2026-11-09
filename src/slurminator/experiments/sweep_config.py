@@ -8,6 +8,9 @@ from typing import Any
 
 import yaml
 
+from slurminator.experiments.experiment_info import ExperimentInfo
+from slurminator.experiments.yaml_utils import load_yaml
+
 DEFAULT_SEED = 42
 
 
@@ -64,6 +67,9 @@ class CustomSweepConfig:
 class MasterExperimentConfig:
     """Master configuration for experiment generation."""
 
+    experiment_name: str | None = field(default=None, kw_only=True)
+    experiment_description: str | None = field(default=None, kw_only=True)
+
     run_custom_sweeps: bool = False
     run_wandb_sweep: bool = False
     custom_sweeps: list[CustomSweepConfig] = field(default_factory=list)
@@ -77,6 +83,9 @@ class MasterExperimentConfig:
     config_profile: str | None = None
 
     def __post_init__(self) -> None:
+        info = ExperimentInfo(name=self.experiment_name, description=self.experiment_description)
+        self.experiment_name = info.name
+        self.experiment_description = info.description
         self.custom_sweeps = [
             sweep if isinstance(sweep, CustomSweepConfig) else CustomSweepConfig(**sweep)
             for sweep in self.custom_sweeps
@@ -92,6 +101,28 @@ class MasterExperimentConfig:
         if not isinstance(raw, dict):
             raise ValueError(f"{yaml_path} must contain a YAML mapping.")
         return MasterExperimentConfig(**raw)
+
+    @staticmethod
+    def from_sweep_yaml(
+        yaml_path: str | Path, *, num_epochs: int | None = None, config_profile: str | None = None
+    ) -> MasterExperimentConfig:
+        """Load a CLI sweep file, including context for the whole experiment list."""
+        data = load_yaml(yaml_path)
+        if not isinstance(data, dict):
+            raise ValueError(f"{yaml_path} must contain a YAML mapping.")
+        sweeps_raw = data.get("custom_sweeps", data)
+        if isinstance(sweeps_raw, dict):
+            sweeps_raw = sweeps_raw.get("custom_sweeps", [])
+        if not isinstance(sweeps_raw, list):
+            raise ValueError("custom_sweeps must be a list in the provided YAML file.")
+        return MasterExperimentConfig(
+            run_custom_sweeps=True,
+            custom_sweeps=sweeps_raw,
+            num_epochs=num_epochs,
+            config_profile=config_profile,
+            experiment_name=data.get("experiment_name"),
+            experiment_description=data.get("experiment_description"),
+        )
 
 
 __all__ = ["DEFAULT_SEED", "CustomSweepCase", "CustomSweepConfig", "MasterExperimentConfig"]

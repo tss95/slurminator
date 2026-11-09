@@ -14,6 +14,79 @@ Slurminator uses two related YAML formats:
 Use `--sweepfile` to create a new experiment list. Use `--yaml` to run or resume
 an existing experiment list.
 
+## Experiment Title And Description
+
+Add optional `experiment_name` and `experiment_description` strings at the root
+of a custom-sweep YAML to describe the whole experiment list:
+
+```yaml
+experiment_name: CIFAR-10 optimizer comparison
+experiment_description: |
+  Compare AdamW and SGD on CIFAR-10 at two learning rates.
+  Keep the model, seed, and training budget fixed to isolate optimizer effects.
+custom_sweeps:
+  - experiment_prefix: optimizer_ablation
+    task_type: train
+    datasets: [cifar10]
+    seeds: [42]
+    num_epochs: 10
+    sweep_keys:
+      optimizer.name: [adamw, sgd]
+      optimizer.lr: [0.001, 0.0003]
+```
+
+Use a short title of a few words that identifies the evaluation. In one to
+three sentences, expand on the objective, main comparison, and relevant
+dataset/setup. For lists containing several sweeps or datasets, describe their
+shared purpose. These fields do not change experiment IDs, commands, run
+names, or `experiment_prefix`.
+
+The generic CLI and PMT plugin copy both fields into the generated ledger's
+top-level `metadata` mapping. When writing a runnable `--yaml` ledger by hand,
+use the same location:
+
+```yaml
+metadata:
+  experiment_name: CIFAR-10 optimizer comparison
+  experiment_description: |
+    Compare AdamW and SGD on CIFAR-10 at a fixed learning rate.
+    Keep the model, seed, and training budget fixed to isolate optimizer effects.
+experiments:
+  - experiment_id: adamw_smoke
+    status: pending
+    task_type: train
+    dataset_name: cifar10
+    extra_command: "python train.py --optimizer adamw --lr 0.001 --orchestrator"
+  - experiment_id: sgd_smoke
+    status: pending
+    task_type: train
+    dataset_name: cifar10
+    extra_command: "python train.py --optimizer sgd --lr 0.001 --orchestrator"
+```
+
+Dashboard v4 displays `Slurminator - CIFAR-10 optimizer comparison` in its top
+bar. Press `g`, then select **Show exp info** to open the title and description
+in a scrollable box. Arrow and page keys scroll; **Close** or `Esc` returns to
+the global menu. Text is displayed literally, including brackets, and
+description paragraphs are preserved.
+
+Both fields are independently optional. Omitted, `null`, empty, or
+whitespace-only values count as absent. Without a name the title stays
+`Slurminator`; without a description the info box says
+`No experiment description provided.` Titles are normalized to one line.
+Other value types are rejected. Existing configs need no migration.
+
+Ledger saves preserve this context, and resuming with `--yaml` restores it.
+To change the context of an existing run, stop its controller, edit the
+ledger's metadata, and restart with that ledger. Editing the original sweep
+file does not update a ledger that has already been generated.
+
+Python integrations can set the same optional fields on
+`MasterExperimentConfig`. Project generator plugins can use
+`MasterExperimentConfig.from_sweep_yaml(path, num_epochs=..., config_profile=...)`
+to load them together with the sweep definitions before calling
+`BaseOrchestrator.generate_experiment_file()`.
+
 ## Experiment-State YAML
 
 The minimum runnable state file is:
@@ -170,13 +243,19 @@ You may change concurrency flags when resuming. Be careful not to set the active
 cluster limit to zero for a YAML that still has live jobs on that cluster,
 because disabled assignments can be reset to `pending`.
 
-While Slurminator is running, it reloads the experiment-state YAML each poll
-cycle. That means the file is an operational control surface as well as a record:
-if you set a finished or failed row back to `status: pending`, Slurminator will
-consider it available for relaunch when concurrency permits. For clean
-bookkeeping, also remove stale scheduler fields such as `job_id`, timestamps,
-and output paths; otherwise new submission metadata will overwrite the fields it
-owns as the row is relaunched.
+For ledgers below 100 rows, Slurminator reloads the experiment-state YAML each
+poll cycle. The file can therefore act as an operational control surface: if
+you set a finished or failed row back to `status: pending`, Slurminator considers
+it available for relaunch when concurrency permits. For clean bookkeeping, also
+remove stale scheduler fields such as `job_id`, timestamps, and output paths.
+
+At 100 rows or more, Slurminator uses its high-volume path. Scheduler transitions
+and accepted submissions are fsynced to compact sidecar journals immediately,
+while the YAML stays in memory and checkpoints every 60 seconds. Status-only
+telemetry is bounded and cached metric history is reconstructed only when a
+detail or plot screen requests it. Stop the controller before editing a
+high-volume YAML manually, because an in-memory checkpoint can otherwise
+overwrite concurrent file edits.
 
 To intentionally rerun a finished experiment after Slurminator has stopped, make
 the same edit and restart with the generated file:
@@ -461,6 +540,12 @@ Current expansion semantics are deliberately simple:
   `sweep_keys` rows as sibling variants.
 - It does **not** multiply `cases x sweep_keys`. If you need named nested
   variants, write those combinations as explicit `cases`.
+- Duplicate detection is exact: a case is skipped only when its experiment id
+  (or one of its seeded ids, `<id>_s<seed>`) was already generated - for example
+  the same case name in two blocks with the same `experiment_prefix` and dataset.
+  Every skip is logged at WARNING with the reason, and the final summary counts
+  them. Case names that are prefixes of other case names (`b7` vs `b70`) are
+  distinct experiments and are all generated.
 
 ## Epochs, Steps, And Progress
 

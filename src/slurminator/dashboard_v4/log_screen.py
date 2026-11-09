@@ -109,7 +109,13 @@ class PerRunLogScreen(Screen[None]):
     def on_mount(self) -> None:
         """Fetch the initial log tail and start live refreshes."""
         self.refresh_log(force=True)
-        self.set_interval(getattr(self.app, "refresh_interval", 1.0), self.refresh_log)
+        refresh_interval = getattr(self.app, "refresh_interval", 1.0)
+        orchestrator = getattr(self.app, "orchestrator", None)
+        if getattr(orchestrator, "low_compute", False):
+            # Tailing logs reads shared files; cached screen redraws can remain
+            # responsive independently of this I/O cadence.
+            refresh_interval = max(refresh_interval, orchestrator.poll_interval)
+        self.set_interval(refresh_interval, self.refresh_log)
         self.query_one("#log", RichLog).focus()
         self._update_selection_help()
 

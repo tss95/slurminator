@@ -29,9 +29,9 @@ Slurminator separates *experiment intent* from *cluster execution*.
    resource defaults, environment script, and concurrency limits.
 5. The training script applies any forwarded config overrides, runs the
    experiment, and can optionally write live status files through the callback.
-6. Slurminator polls scheduler state plus live status files, writes SLURM job
-   ids, output paths, resource requests, timestamps, metrics, and links back into
-   the experiment-state YAML, and renders the dashboard.
+6. Slurminator polls scheduler state and live status files on separate cadences,
+   writes job ids, output paths, resource requests, timestamps, metrics, and
+   links back into the experiment-state YAML, and renders the dashboard.
 
 The generated file, usually named like
 `experiment_lists/experiments_YYYYMMDD_HHMMSS.yaml`, is therefore both the
@@ -39,9 +39,11 @@ launch input and the persistent record of what happened. If the process stops,
 launch Slurminator again with
 `--yaml experiment_lists/experiments_YYYYMMDD_HHMMSS.yaml` to pick up where it
 left off, assuming the recorded scheduler jobs, logs, and status files are still
-visible from the cluster filesystem. While Slurminator is running, it reloads
-the YAML each poll cycle; editing a completed or failed row back to
-`status: pending` makes it eligible for relaunch when concurrency is available.
+visible from the cluster filesystem. Runs below 100 rows reload the YAML each
+poll cycle. At 100 rows or more, Slurminator keeps the ledger in memory between
+60-second checkpoints so scheduler polling does not wait for a large YAML parse
+and dump. Stop a high-volume controller before editing its YAML manually; use
+the dashboard controls for live changes.
 
 This is useful because large sweeps become small, reviewable YAML artifacts
 instead of custom launch scripts. You can distribute or archive the sweep file,
@@ -93,6 +95,17 @@ If the console script is not on `PATH`, use `python -m slurminator`.
 
 See [docs/cli.md](docs/cli.md) for the full built-in CLI reference and plugin
 extension hooks.
+
+For compact, read-only status and result summaries, use
+`python -m slurminator.results inspect path/to/experiments.yaml`. The
+[result query guide](docs/result_analysis.md) covers metric exports, seed
+summaries, and observed history queries; an accompanying
+[agent skill](skills/slurminator-results/SKILL.md) avoids repeated parsing scripts.
+
+The [agent interface](docs/agent.md) adds JSON progress/count queries, quiet
+completion waits, and resource proposals that require explicit user approval.
+Approved controllers can use `--headless` to publish status without a dashboard.
+The observer commands never launch a controller or submit jobs.
 
 ## Quickstart
 
@@ -274,7 +287,14 @@ and continue submitting pending rows. Accepted job IDs are fsynced first to a
 small receipt journal under `.orchestrator_status/_submission_receipts/`, then
 compacted into the larger experiment YAML in batches. Keep that sidecar with
 the YAML while a controller may be running or resuming; recovery replays it
-before any new submission.
+before any new submission. Scheduler transitions use the same pattern through
+`.orchestrator_status/_scheduler_lifecycle/`, so a queued/running/terminal
+change remains recoverable while a large YAML checkpoint is deferred.
+
+For ledgers with 100 rows or more, status-only telemetry is read in bounded
+batches every 10 seconds and cached metric history is omitted from routine
+checkpoints. Detail and plot screens load history on demand. Slurm logs are
+also read only from explicit log/detail actions, not during lifecycle polling.
 
 Generate an experiment list from a custom sweep file:
 
@@ -481,6 +501,12 @@ use it, or pass `--dashboard-ui v3` for the legacy Rich dashboard and
 `--dashboard-ui v2` for the older compact dashboard.
 Phase 4 implementation decisions are tracked in
 [`docs/slurminator_ui_v4_phase4_decisions.md`](docs/slurminator_ui_v4_phase4_decisions.md).
+
+Give an experiment list optional `experiment_name` and
+`experiment_description` fields at the root of its sweep config (or under
+`metadata` in a runnable ledger). V4 shows `Slurminator - <experiment_name>`
+in the top bar. Press `g` and choose **Show exp info** to read the description
+in a scrollable box. See the [YAML examples and authoring guidance](docs/sweep_yaml.md#experiment-title-and-description).
 
 The v4 dashboard can show scheduler state and SLURM log tails without a
 training callback. Live progress, primary/secondary metric columns,

@@ -67,14 +67,115 @@ Partition overrides:
 ## Runtime Behavior
 
 - `--poll-interval SECONDS`: scheduler polling interval. Default: `2`.
+- `--low-compute`: opt-in controller preset for shared login nodes. Enforces a
+  minimum 60-second poll interval and reduces telemetry, submission, persistence,
+  and automatic log reads while preserving the selected dashboard. See the preset
+  details below.
 - `--dashboard-ui v2|v3|v4`: dashboard implementation. If omitted,
   `orchestrator_config.yaml` may set `dashboard.ui_version`; otherwise the
   package default is `v4`. Use `--dashboard-ui v3` for the legacy Rich
   dashboard.
-- `--dry-run`: generate and validate inputs, then exit without launching jobs.
+- `--headless`: run controller maintenance without a dashboard or repeated
+  overview output. Publish compact status/progress receipts and a final JSON
+  summary after terminal telemetry collection and ledger saving settle. Normal
+  resource and scheduler settings remain in effect. See the
+  [agent interface](agent.md) for read-only `status`, `wait`, and `prepare`
+  commands and the required launch-approval workflow.
+- `--isolated-submission-env`: submit on the local cluster with a minimal sbatch
+  process environment. Explicit cluster exports remain, while controller Slurm,
+  scratch, cache, container and secret variables are not inherited. This path
+  uses the current shared checkout, never retries submission or falls back to a
+  remote host, and requires a job wrapper that initializes its own environment.
+  It does not authorize submission or establish site support. Plugin W&B sweep
+  runners are unsupported in this mode; use a prepared ledger or sweepfile.
+- `--dry-run`: resolve local YAML inputs or generate a ledger, then exit without
+  controller startup, SSH connections, scheduler access, or live sweep runners.
+  It is supported on CPU and GPU nodes, including containers without Slurm
+  clients. Existing `--yaml` inputs are checked for file existence; this mode
+  does not run training or the controller's full preflight. A plugin must convert
+  sweep-runner dry-runs into local inputs; unsupported live sweep runners are
+  rejected before any connection is created.
 - `--debug`: enable debug mode.
 - `--no-prog`: reserved compatibility flag; currently ignored by the generic
   orchestrator.
+
+### Final experiment reference
+
+In dashboard mode, after the dashboard and HPC connections close, the final line identifies the
+experiment-state YAML for copying into agent prompts or a later `--yaml` command:
+
+```text
+EXPERIMENT COMPLETE: /path/to/experiment_lists/experiments_20260911_163454.yaml
+```
+
+The reference is an absolute path, printed as plain text without log prefixes,
+color, or wrapping, even when INFO logging is disabled. `COMPLETE` means the
+orchestrator reached its normal completion condition; individual rows can still
+have failed. Quitting the dashboard or interrupting an unfinished run prints
+`EXPERIMENT STOPPED: <path>`. A dry run ends with `DRY RUN COMPLETE: <path>`, using
+the generated experiment YAML when `--sweepfile` was provided. Exceptions still
+propagate without a completion marker.
+
+Headless mode instead prints a final JSON summary with the ledger path, status
+receipt path, outcome, progress, counts, and missing metrics. Its observers use
+the receipt's controller identity and final ledger hash to distinguish completion
+from interruption, replacement, or later ledger changes. A 100% progress value
+alone does not establish finalization.
+
+### Low-compute preset
+
+Add `--low-compute` to an existing `--yaml` or `--sweepfile` command:
+
+```bash
+slurminator --yaml experiment_lists/small.yaml --olivia-limit 4 --low-compute
+```
+
+Polling alone does not control all controller work: submission bursts and YAML
+checkpoints normally trigger additional scheduler queries, and an open log view
+reads files independently. This preset applies the following limits:
+
+| Activity | With `--low-compute` |
+| --- | --- |
+| Scheduler | At least 60 seconds between normal cycles; batched queries per cluster. No extra queries between submission bursts or after checkpoints. |
+| Telemetry | At most 32 active/pending-final status files per cycle, rotating fairly; at least 60 seconds between reads. No automatic metric-history loading. |
+| Submissions | Several paced batches per cycle, each capped at 8 accepted jobs and a 2-second time budget. The full fill phase accepts at most 32 jobs within a 30-second budget, checked before each attempt. A synchronous submission is allowed to finish. |
+| Persistence | Keep the ledger in memory, including for small sweeps. Periodic full YAML checkpoints at least 300 seconds apart; submission receipts and scheduler transitions remain durable immediately. Operator commands, retry decisions, and shutdown still checkpoint when required. |
+| Dashboard | Preserve the selected UI, including interactive v4. Its home screen checks cached snapshot versions and skips unchanged data; navigation remains responsive. |
+| Log view | Read once when opened, then tail automatically at the controller poll interval (at least 60 seconds), preserving a slower configured UI interval. Manual refresh remains immediate. |
+| Completion | Exit after all rows are terminal and outstanding final status reads finish or exhaust their existing retry budget. |
+
+`--low-compute --poll-interval 120` uses a 120-second cycle. Shorter positive
+values are raised to 60 seconds; nonpositive values are rejected. More
+conservative programmatic submission/telemetry/checkpoint limits are retained;
+the fill count is also capped by `submission_checkpoint_size`. The flag
+affects the controller; submitted jobs keep their resource requests and training
+environment.
+
+The controller can continue queueing after a 2-second batch without waiting for
+the next 60-second monitoring cycle. Before another batch, it waits one second
+per job accepted in the preceding batch, up to eight seconds, checking pause/exit
+during the wait. Operator commands are processed between batches. Accepted jobs
+immediately consume concurrency slots and have durable submission receipts;
+these extra batches do not trigger scheduler queries, telemetry reads, or routine
+YAML checkpoints. Each row is considered once per fill, so failed submissions
+are not retried within that fill. This paces accepted-job bursts; failed attempts
+do not count toward the cooldown, so it is not a strict scheduler RPC rate limit.
+
+Submission ramp-up remains bounded, while status updates, automatic log reads,
+and final-metric collection retain their slower monitoring cadence.
+Opening detail/plot screens or explicitly refreshing them can load a run's history
+on demand. Use one controller per ledger, and stop it before editing the YAML
+because this mode keeps active state in memory. Omit the flag on restart to
+restore normal behavior. Plugin-specific
+W&B sweep runners do not implement this preset and reject the combination.
+
+This preset targets recurring scheduler and shared-filesystem work. Dashboard
+and SSH threads remain available; it does not impose an OS CPU/thread limit.
+Cached screen refreshes do not reload the experiment YAML or ingest status files;
+quota queries retain their existing five-minute cache. Reducing repeated file
+reads and writes follows
+[NRIS login-node guidance](https://documentation.sigma2.no/jobs/node-types.html)
+and [Slurm's warning about excessive scheduler RPCs](https://slurm.schedmd.com/squeue.html#SECTION_PERFORMANCE).
 
 ## Config Discovery
 

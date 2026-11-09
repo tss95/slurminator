@@ -300,3 +300,51 @@ def test_status_callback_metric_layout_separates_table_history_and_dump(tmp_path
     assert status.display.secondary_metric == "val/loss"
     assert set(status.display.metric_info) == {"train/loss", "val/acc", "val/loss"}
     assert read_history(callback)[-1].metrics == {"train/loss": 0.4, "val/acc": 0.9}
+
+
+def test_initializing_after_running_is_benign_not_fatal(tmp_path):
+    """A fresh process (requeue/retry/OOM-restart) announcing 'initializing' after
+    the persisted status already reached 'running' must not crash the run; the
+    advanced status is kept and the write skipped (2026-08-31 regression)."""
+    clock = FakeClock()
+    cfg = make_cfg()
+    trainer = DummyTrainer(cfg)
+
+    cb1 = OrchestratorStatusCallback(
+        cfg=cfg, save_path=tmp_path, job_id="12345", sweep_id="sweep-1", min_write_interval_seconds=0.0, time_fn=clock
+    )
+    cb1.on_train_start(trainer)
+    assert cb1._write_status("running", trainer=trainer, force=True) is True
+    assert read_status(cb1).status == "running"
+
+    # Second incarnation: fresh callback object, same persisted status file.
+    # Previously this raised ValueError inside on_train_start and killed the run.
+    cb2 = OrchestratorStatusCallback(
+        cfg=cfg, save_path=tmp_path, job_id="12345", sweep_id="sweep-1", min_write_interval_seconds=0.0, time_fn=clock
+    )
+    cb2.on_train_start(trainer)
+    assert read_status(cb2).status == "running"
+
+    # And the second incarnation can still proceed forward normally.
+    assert cb2._write_status("running", trainer=trainer, force=True) is True
+    assert cb2._write_status("completed", trainer=trainer, force=True) is True
+    assert read_status(cb2).status == "completed"
+
+
+def test_initializing_after_completed_is_benign_not_fatal(tmp_path):
+    clock = FakeClock()
+    cfg = make_cfg()
+    trainer = DummyTrainer(cfg)
+
+    cb1 = OrchestratorStatusCallback(
+        cfg=cfg, save_path=tmp_path, job_id="12345", sweep_id="sweep-1", min_write_interval_seconds=0.0, time_fn=clock
+    )
+    cb1.on_train_start(trainer)
+    cb1._write_status("running", trainer=trainer, force=True)
+    cb1._write_status("completed", trainer=trainer, force=True)
+
+    cb2 = OrchestratorStatusCallback(
+        cfg=cfg, save_path=tmp_path, job_id="12345", sweep_id="sweep-1", min_write_interval_seconds=0.0, time_fn=clock
+    )
+    cb2.on_train_start(trainer)
+    assert read_status(cb2).status == "completed"

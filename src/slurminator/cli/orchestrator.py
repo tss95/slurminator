@@ -14,9 +14,8 @@ from typing import Any
 from slurminator.base_orchestrator import BaseOrchestrator
 from slurminator.config import HPCType, HPC_CONFIGS, OrchestratorSettings, REPO_ROOT_ENV, load_user_config
 from slurminator.connection_manager import HPCConnectionConfig, HPCConnectionManager
-from slurminator.experiments import CustomSweepConfig, MasterExperimentConfig
-from slurminator.experiments.yaml_utils import load_yaml
-from slurminator.hpc_orchestrator import HPCOrchestrator
+from slurminator.experiments import MasterExperimentConfig
+from slurminator.hpc_orchestrator import HPCOrchestrator, LOW_COMPUTE_POLL_INTERVAL_SECONDS
 from slurminator.launch_guard import get_orchestrator_gpu_hpc_launch_block_message
 from slurminator.logging_config import configure_logging
 from slurminator.plugins import DefaultOrchestratorPlugin, OrchestratorPlugin, SimpleCommandPlugin
@@ -93,15 +92,35 @@ def build_base_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--poll-interval", type=int, default=2, help="Polling interval in seconds.")
     parser.add_argument(
+        "--low-compute",
+        action="store_true",
+        help=(
+            "Reduce controller load: poll at least 60s apart, bound telemetry/submissions, "
+            "checkpoint less often, and slow automatic log reads while keeping the selected dashboard."
+        ),
+    )
+    parser.add_argument(
         "--dashboard-ui",
         dest="dashboard_ui",
         choices=["v2", "v3", "v4"],
         default=None,
         help="Select dashboard UI version. Default: orchestrator config value, otherwise v4.",
     )
-    parser.add_argument("--dry-run", action="store_true", help="Generate/validate and exit without launching jobs.")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Resolve/generate local experiment YAML without connections or jobs."
+    )
     parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run without a dashboard or overview, publishing compact agent status and completion receipts.",
+    )
     parser.add_argument("--no-prog", action="store_true", help="Reserved compatibility flag; ignored by orchestrator.")
+    parser.add_argument(
+        "--isolated-submission-env",
+        action="store_true",
+        help="Submit directly to local sbatch with a minimal environment; reject remote submission hosts.",
+    )
 
     parser.add_argument("--hpc-config-file", type=str, default=None, help="Path to hpc_config.yaml.")
     parser.add_argument(
@@ -167,6 +186,10 @@ def run_orchestrator_cli(
     if parser_extender is not None:
         parser = parser_extender(parser)
     args = parser.parse_args(raw_argv)
+    if args.isolated_submission_env and getattr(args, "wandb_sweep", None) is not None:
+        parser.error(
+            "--isolated-submission-env requires --yaml or --sweepfile; plugin sweep runners do not support isolation"
+        )
 
     if args_preparer is None and discovered_plugin is not None:
         args_preparer = _get_optional_hook(discovered_plugin, "prepare_args")
@@ -174,6 +197,18 @@ def run_orchestrator_cli(
         args_preparer(args)
     else:
         _normalise_generic_generation_args(args)
+
+    if args.headless:
+        _route_console_logs_to_stderr()
+
+    if args.low_compute:
+        if args.poll_interval <= 0:
+            parser.error("--poll-interval must be positive with --low-compute")
+        if getattr(args, "wandb_sweep", None) is not None:
+            parser.error(
+                "--low-compute requires --yaml or --sweepfile; plugin sweep runners do not support this preset"
+            )
+        args.poll_interval = max(args.poll_interval, LOW_COMPUTE_POLL_INTERVAL_SECONDS)
 
     loaded_config = None
     if load_configs:
@@ -183,6 +218,20 @@ def run_orchestrator_cli(
             orchestrator_config_file=args.orchestrator_config_file,
             repo_root=repo_root,
         )
+
+    # Local planning must work inside CPU/GPU containers without Slurm or SSH.
+    # Handle it before controller guards, connection bootstrap, and plugin runners.
+    if args.dry_run:
+        if getattr(args, "wandb_sweep", None) is not None:
+            parser.error("--dry-run requires --yaml or --sweepfile; it cannot start a live sweep runner")
+        if experiment_generator is None and discovered_plugin is not None:
+            experiment_generator = _get_optional_hook(discovered_plugin, "generate_experiment_yaml")
+        experiment_file = _resolve_experiment_file(args, experiment_generator=experiment_generator)
+        if not Path(experiment_file).is_file():
+            raise SystemExit(f"Experiment file not found: {experiment_file}")
+        logger.info("Dry run enabled - not launching HPC orchestrator.")
+        print(f"DRY RUN COMPLETE: {Path(experiment_file).resolve()}", flush=True)
+        return
 
     if launch_guard is get_orchestrator_gpu_hpc_launch_block_message and discovered_plugin is not None:
         launch_guard = _get_optional_hook(discovered_plugin, "launch_guard") or launch_guard
@@ -201,7 +250,10 @@ def run_orchestrator_cli(
 
     concurrency_limits = build_concurrency_limits(args)
     early_connection_manager = _bootstrap_connection_manager(
-        concurrency_limits, cluster_configs=cluster_configs, connection_manager_cls=connection_manager_cls
+        concurrency_limits,
+        cluster_configs=cluster_configs,
+        connection_manager_cls=connection_manager_cls,
+        isolated_submission_env=args.isolated_submission_env,
     )
 
     if getattr(args, "wandb_sweep", None) is not None:
@@ -217,10 +269,6 @@ def run_orchestrator_cli(
     experiment_file = _resolve_experiment_file(args, experiment_generator=experiment_generator)
     if not Path(experiment_file).exists():
         raise SystemExit(f"Experiment file not found: {experiment_file}")
-
-    if args.dry_run:
-        logger.info("Dry run enabled - not launching HPC orchestrator.")
-        return
 
     if plugin_factory is not None:
         plugin = plugin_factory(args)
@@ -248,8 +296,25 @@ def run_orchestrator_cli(
         plugin=plugin,
         partition_overrides=partition_overrides,
         dashboard_settings=loaded_config.orchestrator.dashboard if loaded_config is not None else None,
+        **({"low_compute": True} if args.low_compute else {}),
+        **({"headless": True} if args.headless else {}),
+        **({"isolated_submission_env": True} if args.isolated_submission_env else {}),
     )
     orchestrator.run()
+
+
+def _route_console_logs_to_stderr() -> None:
+    """Reserve headless stdout for results while preserving file/capture handlers."""
+    loggers = [logging.getLogger()]
+    loggers.extend(value for value in logging.Logger.manager.loggerDict.values() if isinstance(value, logging.Logger))
+    for active_logger in loggers:
+        for handler in active_logger.handlers:
+            if (
+                isinstance(handler, logging.StreamHandler)
+                and not isinstance(handler, logging.FileHandler)
+                and (handler.stream is sys.stdout or handler.stream is sys.__stdout__)
+            ):
+                handler.setStream(sys.stderr)
 
 
 def _resolve_dashboard_ui(cli_value: str | None, loaded_config: Any | None) -> str:
@@ -379,11 +444,8 @@ def generate_experiment_yaml_from_flags(args: argparse.Namespace, *, orchestrato
     if not getattr(args, "custom_sweep_file", None):
         raise ValueError("--sweepfile requires a YAML spec path.")
 
-    master_config = MasterExperimentConfig(
-        run_custom_sweeps=True,
-        custom_sweeps=_load_custom_sweeps(args.custom_sweep_file),
-        num_epochs=args.num_epochs,
-        config_profile=args.config_profile,
+    master_config = MasterExperimentConfig.from_sweep_yaml(
+        args.custom_sweep_file, num_epochs=args.num_epochs, config_profile=args.config_profile
     )
     generator = orchestrator_cls(master_config)
     generator.generate_all_experiments()
@@ -417,17 +479,6 @@ def _resolve_experiment_file(
         return str(generated)
 
     raise SystemExit("No action specified. Provide --yaml or --sweepfile.")
-
-
-def _load_custom_sweeps(path: str) -> list[CustomSweepConfig]:
-    """Load generic custom-sweep specs from YAML."""
-    data = load_yaml(path)
-    sweeps_raw = data.get("custom_sweeps", data)
-    if isinstance(sweeps_raw, dict):
-        sweeps_raw = sweeps_raw.get("custom_sweeps", [])
-    if not isinstance(sweeps_raw, list):
-        raise ValueError("custom_sweeps must be a list in the provided YAML file.")
-    return [CustomSweepConfig(**entry) for entry in sweeps_raw]
 
 
 def _default_plugin_from_args(
@@ -465,13 +516,23 @@ def _bootstrap_connection_manager(
     *,
     cluster_configs: Mapping[HPCType, Any] | None = None,
     connection_manager_cls: type[HPCConnectionManager] = HPCConnectionManager,
+    isolated_submission_env: bool = False,
 ) -> HPCConnectionManager | None:
     """Create and warm SSH connections for clusters with non-zero limits."""
     conn_cfgs = _connection_configs_for_limits(concurrency_limits, cluster_configs=cluster_configs)
+    if isolated_submission_env:
+        conn_cfgs = {hpc: config for hpc, config in conn_cfgs.items() if concurrency_limits.get(hpc, 0) > 0}
     if not conn_cfgs:
         return None
 
     connection_manager = connection_manager_cls(conn_cfgs)
+    if isolated_submission_env:
+        validator = getattr(connection_manager, "validate_isolated_submission_target", None)
+        if not callable(validator):
+            raise RuntimeError("Connection manager does not support isolated submission")
+        for hpc in conn_cfgs:
+            validator(hpc)
+        return connection_manager
     for hpc in list(conn_cfgs.keys()):
         try:
             is_local = connection_manager.is_local_hpc(hpc)
