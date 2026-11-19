@@ -127,6 +127,7 @@ class HPCClusterConfig:
     submission_use_key: bool | None = None
     submission_key_path: str | None = None
     submission_two_factor: bool | None = None
+    job_script: str | None = None
 
     def __post_init__(self) -> None:
         self.cluster_type = coerce_hpc_type(self.cluster_type)
