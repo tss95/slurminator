@@ -9,7 +9,7 @@ import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from shlex import join
 from typing import Any
 
@@ -335,7 +335,11 @@ def build_sbatch_command(
     if not any(item.startswith("--export=") for item in sbatch if isinstance(item, str)):
         sbatch.append("--export=ALL")
 
-    universal_script = f"{cluster_config.repo_path}/universal_job.sh"
+    universal_script = getattr(cluster_config, "job_script", None)
+    if universal_script is None:
+        universal_script = f"{cluster_config.repo_path}/universal_job.sh"
+    elif not PurePosixPath(universal_script).is_absolute():
+        raise ValueError("job_script must be an absolute path on the submission host")
     sbatch.append(universal_script)
     if cluster_config.environment_setup:
         sbatch.extend(["--env_script", f"{cluster_config.repo_path}/{cluster_config.environment_setup}"])
@@ -442,10 +446,11 @@ def _push_critical_scripts(hpc_type: HPCType, cluster_config: Any, connection_ma
     try:
         root = Path(__file__).resolve().parents[2]
         files = [
-            (str(root / "universal_job.sh"), f"{cluster_config.repo_path}/universal_job.sh"),
             (str(root / "step_0.sh"), f"{cluster_config.repo_path}/step_0.sh"),
             (str(root / "multi_gpu.sh"), f"{cluster_config.repo_path}/multi_gpu.sh"),
         ]
+        if getattr(cluster_config, "job_script", None) is None:
+            files.insert(0, (str(root / "universal_job.sh"), f"{cluster_config.repo_path}/universal_job.sh"))
         logger.info("Remote path %s is not a git repo – pushing critical scripts", cluster_config.repo_path)
         for local_path, remote_path in files:
             try:
@@ -453,11 +458,11 @@ def _push_critical_scripts(hpc_type: HPCType, cluster_config: Any, connection_ma
                     connection_manager.upload_file(hpc_type, local_path, remote_path)
             except Exception as exc:
                 logger.warning("Upload failed for %s -> %s: %s", local_path, remote_path, exc)
-        connection_manager.run_command(
-            hpc_type,
-            f"chmod +x {cluster_config.repo_path}/universal_job.sh {cluster_config.repo_path}/multi_gpu.sh 2>/dev/null || true",
-            prefer_remote=True,
-        )
+        chmod_paths = [f"{cluster_config.repo_path}/multi_gpu.sh"]
+        if getattr(cluster_config, "job_script", None) is None:
+            chmod_paths.append(f"{cluster_config.repo_path}/universal_job.sh")
+        chmod_command = join(["chmod", "+x", "--", *chmod_paths])
+        connection_manager.run_command(hpc_type, f"{chmod_command} 2>/dev/null || true", prefer_remote=True)
     except Exception as exc:
         logger.warning("Remote script sync skipped/failed: %s", exc)
 

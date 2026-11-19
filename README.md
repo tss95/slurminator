@@ -404,6 +404,22 @@ activate containers, set cache paths, and configure tracker credentials.
 The examples use `step_0.sh`, but adopters can use any project-local script
 name.
 
+The Slurminator checkout provides [`universal_job.sh`](universal_job.sh).
+To use it directly, set `job_script` in the cluster entry in `hpc_config.yaml`
+to the wrapper's absolute path on the host that runs `sbatch`:
+
+```yaml
+job_script: /shared/tools/slurminator/universal_job.sh
+environment_setup: step_0.sh
+```
+
+For SSH submission, stage that revision of the wrapper where the SSH submission
+host can read it and configure that host's path. Slurminator leaves a configured
+`job_script` alone during repository preparation. The default is
+`<repo_path>/universal_job.sh`. Set and validate `job_script` before removing a
+project's copy. The wrapper passes `--save_path` to the project environment
+script, which initializes the job runtime on each invocation.
+
 ## Logging
 
 The Slurminator CLI configures a clickable-path console logger for the

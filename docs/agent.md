@@ -125,10 +125,10 @@ For a local controller running inside its own allocation, add
 environment isolation. This selects direct local sbatch execution with only a
 minimal identity/process environment and explicit cluster `sbatch_env` values.
 It retains `--export=ALL` over that clean environment to avoid implicit login
-environment reconstruction. The current shared checkout supplies the child
-script; the controller does not run remote repository preparation in this mode.
-The child wrapper must initialize its runtime and set `SLURM_EXPORT_ENV=ALL`
-before launching job steps. PMT's `universal_job.sh` does this.
+environment reconstruction. The controller reads the child script locally from the configured `job_script`
+path or the project checkout, with no remote repository preparation. The child
+wrapper initializes its runtime and sets `SLURM_EXPORT_ENV=ALL` before launching
+job steps.
 
 Slurm always carries submission-process `SLURM_*` variables, including with
 restricted export modes. Sanitizing only the `--export` argument is insufficient;
