@@ -19,6 +19,7 @@ class CommandBuildContext:
     hpc_type: Any
     multi_experiment: bool = False
     runtime_options: Mapping[str, Any] = field(default_factory=dict)
+    run_root: str | None = None
 
 
 @runtime_checkable

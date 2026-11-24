@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
+from slurminator import hpc_orchestrator
 from slurminator.config import HPCType
 from slurminator.hpc_orchestrator import HPCOrchestrator
 from slurminator.plugins import DefaultOrchestratorPlugin
@@ -71,3 +74,15 @@ def test_hpc_orchestrator_explicit_constructor_hooks_override_plugin(tmp_path):
     assert orch.is_local_hpc_fn(HPCType.OLIVIA) is False
     assert orch.dashboard_cls is dict
     assert orch.overview_printer is _overview
+
+
+def test_command_plugin_receives_the_selected_cluster_run_root(tmp_path, monkeypatch) -> None:
+    exp_file = tmp_path / "experiments.yaml"
+    exp_file.write_text("experiments: []")
+    root = str(tmp_path / "configured root")
+    orchestrator = HPCOrchestrator(str(exp_file), concurrency_limits={})
+    monkeypatch.setattr(hpc_orchestrator, "HPC_CONFIGS", {HPCType.OLIVIA: SimpleNamespace(save_path=root)})
+    monkeypatch.setenv("SAVE_PATH", str(tmp_path / "stale"))
+    monkeypatch.setattr(orchestrator.plugin, "build_commands_line", lambda _exp, context: context.run_root)
+
+    assert orchestrator._build_commands_line({}, 1, HPCType.OLIVIA) == root

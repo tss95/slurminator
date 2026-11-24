@@ -3,9 +3,8 @@
 #
 # Responsibilities:
 #   1. Parse the orchestrator-provided job arguments.
-#   2. Validate and export SAVE_PATH before sourcing the user's env script.
-#   3. Source the user's env script.
-#   4. Detect allocated GPUs and launch the provided command.
+#   2. Source the user's env script.
+#   3. Detect allocated GPUs and launch the provided command.
 #
 # The built-in multi-GPU wrapper assumes a Python entrypoint that can be
 # launched with torchrun. Non-torch users should provide their own command
@@ -33,7 +32,6 @@ Options:
   --commands <string> : Quoted shell command(s) to run.
   --exp_id <id>       : Experiment ID used in log messages.
   --outdir <path>     : Output directory used by the caller.
-  --save_path <path>  : Absolute scratch/output path for runtime artifacts.
   -h, --help          : Show this help.
 EOF
 }
@@ -47,7 +45,6 @@ repo_path=""
 commands=""
 exp_id=""
 outdir=""
-save_path=""
 
 while [[ $# -gt 0 ]]; do
   key="$1"
@@ -76,10 +73,6 @@ while [[ $# -gt 0 ]]; do
       outdir="${2:-}"
       shift 2
       ;;
-    --save_path)
-      save_path="${2:-}"
-      shift 2
-      ;;
     -h|--help)
       usage
       exit 0
@@ -103,25 +96,6 @@ echo "  EXP_ID              = ${exp_id:-}"
 echo "  OUTDIR              = ${outdir:-}"
 echo "-------------------------------------------------"
 
-if [[ -z "$save_path" ]]; then
-  echo "CRITICAL ERROR: --save_path is required." >&2
-  exit 1
-fi
-if [[ "$save_path" != /* ]]; then
-  echo "CRITICAL ERROR: --save_path must be absolute, got '$save_path'." >&2
-  exit 1
-fi
-
-mkdir -p "$save_path" || { echo "CRITICAL ERROR: failed to create SAVE_PATH '$save_path'." >&2; exit 1; }
-test_file="$save_path/.slurminator_write_test_${SLURM_JOB_ID:-$$}"
-if ! touch "$test_file" 2>/dev/null; then
-  echo "CRITICAL ERROR: SAVE_PATH '$save_path' is not writable." >&2
-  exit 1
-fi
-rm -f "$test_file" 2>/dev/null || true
-export SAVE_PATH="$save_path"
-log "SAVE_PATH=$SAVE_PATH"
-
 # The status callback must use the ledger row ID, not a shared display name.
 # Override any ID inherited from the controller and preserve it through both
 # supported container runtimes, including their clean-environment mode.
@@ -139,7 +113,8 @@ if [[ -n "$env_script" ]]; then
   log "Sourcing environment script: $env_script"
   set +e +u
   # The env script is project-owned and may use unset variables defensively.
-  source "$env_script" --save_path "$SAVE_PATH"
+  # The wrapper's argument list is empty after option parsing.
+  source "$env_script"
   source_rc=$?
   set -euo pipefail
   if [[ $source_rc -ne 0 ]]; then

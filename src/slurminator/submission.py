@@ -347,8 +347,6 @@ def build_sbatch_command(
         [
             "--repo_path",
             str(cluster_config.repo_path),
-            "--save_path",
-            str(cluster_config.save_path),
             "--commands",
             commands_line,
             "--exp_id",

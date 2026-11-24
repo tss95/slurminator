@@ -134,9 +134,12 @@ If omitted, the callback resolves them from environment variables:
 - `ORCHESTRATOR_SWEEP_ID` or `SWEEP_ID` for optional sweep grouping.
 - `ORCHESTRATOR_EXPERIMENT_ID` or `EXPERIMENT_ID` for the displayed experiment.
 
-The generic Slurminator launcher sets the scheduler-side variables. Project
-launch code should ensure `SAVE_PATH` and, when useful, the orchestrator
-experiment identifiers are exported into the job environment.
+The Slurminator launcher sets the scheduler-side variables. The controller
+exposes the selected cluster's run root to the project command builder in
+`CommandBuildContext.run_root`. The project can pass it to its worker using
+its own command-line interface. In the worker, pass the resolved root as
+`save_path` to the callback or set `SAVE_PATH` for the callback's legacy
+interface.
 
 ## Optional Config Context
 
