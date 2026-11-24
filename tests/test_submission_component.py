@@ -126,6 +126,8 @@ def test_submit_experiment_universal_builds_sbatch_and_records_requested_resourc
     expected_script = cluster.job_script if use_shared_wrapper else f"{cluster.repo_path}/universal_job.sh"
     assert argv[argv.index("--env_script") - 1] == expected_script
     assert argv[argv.index("--env_script") + 1] == f"{cluster.repo_path}/env.sh"
+    assert "--save_path" not in argv
+    assert exp["save_path"] == cluster.save_path
 
 
 def test_build_sbatch_command_uses_cluster_config_for_excludes_gres_and_gpu_bind(tmp_path) -> None:

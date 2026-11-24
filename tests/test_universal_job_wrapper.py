@@ -33,12 +33,10 @@ def _run_universal_job(
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir(exist_ok=True)
 
-    save_path = tmp_path / "save"
-    save_path.mkdir()
-    env = {key: value for key, value in os.environ.items() if not key.startswith("SLURM_")}
+    env = {key: value for key, value in os.environ.items() if not key.startswith("SLURM_") and key != "SAVE_PATH"}
     env.update({"PATH": f"{fake_bin}:{env.get('PATH', '')}", **env_overrides})
 
-    args = ["bash", "universal_job.sh", "--save_path", str(save_path)]
+    args = ["bash", "universal_job.sh"]
     if experiment_id is not None:
         args.extend(["--exp_id", experiment_id])
     if env_script is not None:
@@ -108,7 +106,7 @@ def test_universal_job_rejects_torchrun_when_runtime_sees_fewer_gpus(tmp_path: P
     fake_bin = tmp_path / "bin"
     _write_fake_nvidia_smi(fake_bin, gpu_count=2)
     _write_fake_python_gpu_count(fake_bin, gpu_count=1)
-    marker = tmp_path / "save" / "training-started"
+    marker = tmp_path / "training-started"
 
     result = _run_universal_job(
         tmp_path,
@@ -125,14 +123,14 @@ def test_universal_job_rejects_torchrun_when_runtime_sees_fewer_gpus(tmp_path: P
 def test_universal_job_sources_environment_before_running_command(tmp_path: Path) -> None:
     """Job steps use the initialized runtime and export its environment."""
     env_script = tmp_path / "env.sh"
-    marker = tmp_path / "save" / "initialized.txt"
+    marker = tmp_path / "initialized.txt"
     env_script.write_text(
         "\n".join(
             [
                 "#!/usr/bin/env bash",
                 'test "${SLURM_EXPORT_ENV:-}" = "ALL" || exit 14',
-                'test "$1" = "--save_path" && test "$2" = "$SAVE_PATH" || exit 12',
-                'printf ready > "${SAVE_PATH}/initialized.txt"',
+                'test "$#" -eq 0 && test -z "${SAVE_PATH+x}" || exit 12',
+                f'printf ready > "{marker}"',
                 "export RUNTIME_RELOADED=1",
             ]
         )

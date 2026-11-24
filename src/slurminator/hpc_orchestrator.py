@@ -1354,11 +1354,13 @@ class HPCOrchestrator:
         Build the command string that universal_job.sh will execute.
         Project-specific command semantics are supplied by the orchestrator plugin.
         """
+        cluster_config = HPC_CONFIGS.get(hpc_type)
         context = CommandBuildContext(
             gpus=gpus,
             hpc_type=hpc_type,
             multi_experiment=bool(getattr(self, "multi_experiment", False)),
             runtime_options=self.runtime_options,
+            run_root=cluster_config.save_path if cluster_config else None,
         )
         return self.plugin.build_commands_line(exp, context)
 
@@ -1506,13 +1508,9 @@ class HPCOrchestrator:
         return processed
 
     def _command_queue_save_paths(self, exps: list[dict[str, Any]]) -> list[Path]:
-        """Return local command-queue roots, preferring configured SAVE_PATH values."""
+        """Return local command-queue roots from the ledger and cluster configuration."""
         paths: list[Path] = []
         paths.append(self.experiment_dir)
-
-        env_save_path = os.getenv("SAVE_PATH")
-        if env_save_path:
-            paths.append(Path(env_save_path))
 
         for exp in exps:
             if exp.get("save_path"):
